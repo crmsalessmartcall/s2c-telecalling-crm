@@ -84,6 +84,29 @@ export default function HomePage() {
   const [leadTotalCount, setLeadTotalCount] = useState(0);
   const [leadStatusFilter, setLeadStatusFilter] = useState("all");
 
+  // Step 5: Calling, Dispositions, Custom Call Fields & Follow-Ups
+  const [dispositions, setDispositions] = useState([]);
+  const [callFields, setCallFields] = useState([]);
+  const [callLogs, setCallLogs] = useState([]);
+  const [activeLeadId, setActiveLeadId] = useState("");
+  const [activeCallId, setActiveCallId] = useState(null);
+  const [callStatus, setCallStatus] = useState("idle"); // idle | dialing | connected | on_hold | ended
+  const [isMuted, setIsMuted] = useState(false);
+  const [callSeconds, setCallSeconds] = useState(0);
+  const [selectedDispositionId, setSelectedDispositionId] = useState("");
+  const [followUpAt, setFollowUpAt] = useState("");
+  const [callNotes, setCallNotes] = useState("");
+  const [customCallValues, setCustomCallValues] = useState({});
+  const [savingCall, setSavingCall] = useState(false);
+
+  // Quick config creators (Disposition + Custom Call Field)
+  const [newDispLabel, setNewDispLabel] = useState("");
+  const [newDispFollowup, setNewDispFollowup] = useState(false);
+  const [newCallFieldLabel, setNewCallFieldLabel] = useState("");
+  const [newCallFieldType, setNewCallFieldType] = useState("text");
+  const [newCallFieldOptions, setNewCallFieldOptions] = useState("");
+
+  
   async function loadUserContext(currentSession) {
     if (!currentSession?.user) {
       setProfile(null);
