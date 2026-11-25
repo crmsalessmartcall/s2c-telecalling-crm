@@ -18,11 +18,9 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
 
-  // Login form
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  // Super Admin state
   const [tenants, setTenants] = useState([]);
   const [tenantName, setTenantName] = useState("");
   const [maxLicenses, setMaxLicenses] = useState(5);
@@ -31,7 +29,6 @@ export default function HomePage() {
   const [adminPassword, setAdminPassword] = useState("");
   const [telephonyProvider, setTelephonyProvider] = useState("smartcall");
 
-  // Tenant Admin state
   const [licenseInfo, setLicenseInfo] = useState({ used_licenses: 0, available_licenses: 0, max_licenses: 0 });
   const [teamUsers, setTeamUsers] = useState([]);
   const [memberName, setMemberName] = useState("");
