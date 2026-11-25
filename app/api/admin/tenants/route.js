@@ -70,7 +70,6 @@ export async function POST(req) {
       );
     }
 
-    // 1. Create tenant with license limit & telephony config
     const { data: tenant, error: tenantErr } = await supabase
       .from("tenants")
       .insert({
@@ -86,7 +85,6 @@ export async function POST(req) {
       return NextResponse.json({ error: tenantErr.message }, { status: 400 });
     }
 
-    // 2. Create auth user for Tenant Admin
     const { data: authUser, error: authErr } = await supabase.auth.admin.createUser({
       email: admin_email.trim().toLowerCase(),
       password: admin_password,
@@ -94,12 +92,10 @@ export async function POST(req) {
     });
 
     if (authErr) {
-      // Roll back tenant if auth creation fails
       await supabase.from("tenants").delete().eq("id", tenant.id);
       return NextResponse.json({ error: authErr.message }, { status: 400 });
     }
 
-    // 3. Create profile with tenant_admin role
     const { data: profile, error: profErr } = await supabase
       .from("profiles")
       .insert({
