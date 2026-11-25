@@ -67,7 +67,6 @@ export async function POST(req) {
 
     const tenantId = caller.profile.tenant_id;
 
-    // Check license capacity
     const { data: tenant, error: tErr } = await supabase
       .from("tenants")
       .select("max_licenses, status")
