@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import PortalHeader from "@/app/components/PortalHeader";
 
@@ -37,15 +37,23 @@ export default function HomePage() {
   const [activeTab, setActiveTab] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
 
-  // Point 1 placeholder state for each isolated tab
+  // Point 2: Tenants & License Periods state
   const [tenants, setTenants] = useState([]);
+  const [expandedTenantId, setExpandedTenantId] = useState(null);
+  const [tenantForm, setTenantForm] = useState({
+    tenant_name: "",
+    max_licenses: 10,
+    admin_name: "",
+    admin_email: "",
+    admin_password: "",
+  });
+
+  // Placeholder state for upcoming points (Points 3-5)
   const [teamUsers, setTeamUsers] = useState([]);
   const [licenseInfo, setLicenseInfo] = useState({ used: 0, max: 0 });
   const [projects, setProjects] = useState([]);
 
-  const allowedTabs = profile?.role
-    ? ROLE_ACCESS[profile.role] || ["Dialer"]
-    : [];
+  const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
 
   async function loadRoleData(currentSession, currentProfile) {
     if (!currentSession?.access_token || !currentProfile?.role) return;
@@ -61,6 +69,8 @@ export default function HomePage() {
       });
       if (tRes.ok) {
         setTenants(tRes.data.tenants || []);
+      } else {
+        setStatusMessage(tRes.data.error || "Could not load tenants.");
       }
     }
 
@@ -158,12 +168,107 @@ export default function HomePage() {
     await hydrateSession();
   }
 
-  if (loading) {
-    return (
-      <div style={{ padding: 24, fontFamily: "sans-serif" }}>
-        Loading workspace...
-      </div>
+  async function handleCreateTenant(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/admin/tenants", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        tenant_name: tenantForm.tenant_name,
+        max_licenses: Number(tenantForm.max_licenses),
+        telephony_config: { provider: "smartcall" },
+        admin_name: tenantForm.admin_name,
+        admin_email: tenantForm.admin_email,
+        admin_password: tenantForm.admin_password,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to create tenant.");
+      return;
+    }
+
+    setTenantForm({
+      tenant_name: "",
+      max_licenses: 10,
+      admin_name: "",
+      admin_email: "",
+      admin_password: "",
+    });
+    setStatusMessage(`Created tenant "${res.data.tenant?.name || ""}" (ID: ${res.data.tenant?.id || ""}).`);
+    await loadRoleData(session, profile);
+  }
+
+  async function handleEditSeats(tenant) {
+    if (!session?.access_token) return;
+    const nextSeats = window.prompt(
+      `Seat count for ${tenant.name} (Tenant ID: ${tenant.id}):`,
+      String(tenant.max_licenses ?? 0)
     );
+    if (nextSeats === null) return;
+
+    const startsAt = window.prompt("Start date/time (blank = now, e.g. 2026-12-01):", "") || "";
+    const endsAt = window.prompt("End date/time (blank = open-ended, e.g. 2026-12-31):", "") || "";
+    const reason = window.prompt("Reason / note:", "Seat license update") || "";
+
+    setStatusMessage("");
+    const res = await safeJsonFetch("/api/admin/tenants", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        tenant_id: tenant.id,
+        max_licenses: Number(nextSeats),
+        starts_at: startsAt || undefined,
+        ends_at: endsAt || undefined,
+        reason,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to update seats.");
+      return;
+    }
+
+    setStatusMessage(`Updated "${tenant.name}" to ${nextSeats} seats (Changed by: ${profile?.id}).`);
+    await loadRoleData(session, profile);
+  }
+
+  async function handleDeleteTenant(tenantId) {
+    if (!session?.access_token) return;
+    if (typeof window !== "undefined" && !window.confirm("Delete this tenant and its users permanently?")) {
+      return;
+    }
+
+    setStatusMessage("");
+    const res = await safeJsonFetch("/api/admin/tenants", {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ tenant_id: tenantId }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to delete tenant.");
+      return;
+    }
+
+    setStatusMessage("Tenant deleted.");
+    await loadRoleData(session, profile);
+  }
+
+  if (loading) {
+    return <div style={{ padding: 24, fontFamily: "sans-serif" }}>Loading workspace...</div>;
   }
 
   if (!session || !profile) {
@@ -236,10 +341,150 @@ export default function HomePage() {
       {activeTab === "Tenants & Licenses" &&
         ["super_admin", "platform_ops"].includes(profile.role) && (
           <section>
+            {profile.role === "super_admin" && (
+              <div style={{ marginBottom: 24, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                <h3 style={{ marginTop: 0 }}>Create Customer Tenant</h3>
+                <form onSubmit={handleCreateTenant} style={{ display: "grid", gap: 8, maxWidth: 480 }}>
+                  <input
+                    placeholder="Company / Tenant Name"
+                    value={tenantForm.tenant_name}
+                    onChange={(e) => setTenantForm((f) => ({ ...f, tenant_name: e.target.value }))}
+                    required
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder="Seat Licenses (e.g. 5, 10, 50)"
+                    value={tenantForm.max_licenses}
+                    onChange={(e) => setTenantForm((f) => ({ ...f, max_licenses: e.target.value }))}
+                    required
+                  />
+                  <input
+                    placeholder="Tenant Admin Name"
+                    value={tenantForm.admin_name}
+                    onChange={(e) => setTenantForm((f) => ({ ...f, admin_name: e.target.value }))}
+                    required
+                  />
+                  <input
+                    type="email"
+                    placeholder="Tenant Admin Email"
+                    value={tenantForm.admin_email}
+                    onChange={(e) => setTenantForm((f) => ({ ...f, admin_email: e.target.value }))}
+                    required
+                  />
+                  <input
+                    type="password"
+                    placeholder="Temporary Password"
+                    value={tenantForm.admin_password}
+                    onChange={(e) => setTenantForm((f) => ({ ...f, admin_password: e.target.value }))}
+                    required
+                  />
+                  <button type="submit">Create Tenant & Admin</button>
+                </form>
+              </div>
+            )}
+
             <h3>Tenants & Licenses ({tenants.length})</h3>
-            <p style={{ color: "#475569", fontSize: 13 }}>
-              Dedicated tenant, seat-window, and audit view (ready for Point 2).
-            </p>
+            <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th>Tenant & Unique ID</th>
+                  <th>Status</th>
+                  <th>Used / Seats</th>
+                  <th>Available</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tenants.map((t) => (
+                  <Fragment key={t.id}>
+                    <tr>
+                      <td>
+                        <div>
+                          <strong>{t.name}</strong>
+                        </div>
+                        <code style={{ fontSize: 11 }}>{t.id}</code>
+                      </td>
+                      <td>{t.status}</td>
+                      <td>
+                        {t.used_licenses} / {t.max_licenses}
+                      </td>
+                      <td>{t.remaining_licenses}</td>
+                      <td>
+                        <button type="button" onClick={() => handleEditSeats(t)} style={{ marginRight: 6 }}>
+                          Edit Seats
+                        </button>
+                        {profile.role === "super_admin" && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTenant(t.id)}
+                            style={{ marginRight: 6 }}
+                          >
+                            Delete
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setExpandedTenantId((cur) => (cur === t.id ? null : t.id))}
+                        >
+                          {expandedTenantId === t.id ? "Hide History" : "History"}
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedTenantId === t.id && (
+                      <tr>
+                        <td colSpan="5" style={{ background: "#f8fafc" }}>
+                          <strong>
+                            License Periods History (Tenant ID: <code>{t.id}</code>)
+                          </strong>
+                          <table
+                            border="1"
+                            cellPadding="6"
+                            style={{ width: "100%", borderCollapse: "collapse", marginTop: 8, fontSize: 12 }}
+                          >
+                            <thead>
+                              <tr>
+                                <th>Seats</th>
+                                <th>Start Date</th>
+                                <th>End Date</th>
+                                <th>Changed By ID</th>
+                                <th>Reason</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(t.license_periods || []).map((lp) => (
+                                <tr key={lp.id}>
+                                  <td>{lp.seat_count}</td>
+                                  <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
+                                  <td>
+                                    {lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Active / Open"}
+                                  </td>
+                                  <td>
+                                    <code>{lp.changed_by || "-"}</code>{" "}
+                                    {lp.changed_by_name ? `(${lp.changed_by_name})` : ""}
+                                  </td>
+                                  <td>{lp.reason || "-"}</td>
+                                </tr>
+                              ))}
+                              {(!t.license_periods || t.license_periods.length === 0) && (
+                                <tr>
+                                  <td colSpan="5">No license periods recorded yet.</td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+                {tenants.length === 0 && (
+                  <tr>
+                    <td colSpan="5">No tenants created yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </section>
         )}
 
@@ -249,7 +494,7 @@ export default function HomePage() {
             Team & Licenses — {licenseInfo.used} / {licenseInfo.max} seats used ({teamUsers.length} users)
           </h3>
           <p style={{ color: "#475569", fontSize: 13 }}>
-            Dedicated team user and seat-release view (ready for Point 3).
+            Dedicated team user and seat-release view (coming in Point 3).
           </p>
         </section>
       )}
@@ -258,7 +503,7 @@ export default function HomePage() {
         <section>
           <h3>Campaigns & Leads ({projects.length} campaigns)</h3>
           <p style={{ color: "#475569", fontSize: 13 }}>
-            Dedicated campaign and lead view (ready for Point 4).
+            Dedicated campaign and lead view (coming in Point 4).
           </p>
         </section>
       )}
@@ -267,7 +512,7 @@ export default function HomePage() {
         <section>
           <h3>Dialer Console</h3>
           <p style={{ color: "#475569", fontSize: 13 }}>
-            Shown only on the Dialer tab—never across all tabs (ready for Point 5).
+            Shown only on the Dialer tab—never across all tabs (coming in Point 5).
           </p>
         </section>
       )}
@@ -275,18 +520,14 @@ export default function HomePage() {
       {activeTab === "Follow-Ups" && (
         <section>
           <h3>Follow-Ups</h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>
-            Scheduled callbacks and reminders view.
-          </p>
+          <p style={{ color: "#475569", fontSize: 13 }}>Scheduled callbacks and reminders view.</p>
         </section>
       )}
 
       {activeTab === "Reports" && (
         <section>
           <h3>Reports</h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>
-            Call activity and performance reporting view.
-          </p>
+          <p style={{ color: "#475569", fontSize: 13 }}>Call activity and performance reporting view.</p>
         </section>
       )}
     </div>
