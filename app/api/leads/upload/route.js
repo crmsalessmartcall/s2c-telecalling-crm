@@ -1,34 +1,21 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
 
-function parseCsvRows(csvText) {
-  const lines = String(csvText || "")
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length < 2) return [];
+function toKey(raw) {
+  return (
+    String(raw || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || `field_${Date.now()}`
+  );
+}
 
-  const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const nameIdx = headers.findIndex((h) => ["name", "full_name", "lead_name", "customer"].includes(h));
-  const phoneIdx = headers.findIndex((h) => ["phone", "mobile", "phone_number", "contact"].includes(h));
-  const emailIdx = headers.findIndex((h) => ["email", "email_address"].includes(h));
-
-  return lines.slice(1).map((line) => {
-    const cols = line.split(",").map((c) => c.trim());
-    const customFields = {};
-    headers.forEach((h, idx) => {
-      if (![nameIdx, phoneIdx, emailIdx].includes(idx) && cols[idx] !== undefined) {
-        customFields[h] = cols[idx];
-      }
-    });
-
-    return {
-      name: nameIdx >= 0 ? cols[nameIdx] : cols[0] || "",
-      phone: phoneIdx >= 0 ? cols[phoneIdx] : cols[1] || "",
-      email: emailIdx >= 0 ? cols[emailIdx] || null : null,
-      custom_fields: customFields,
-    };
-  });
+function toLabel(key) {
+  return String(key || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
 }
 
 export async function POST(req) {
@@ -40,7 +27,6 @@ export async function POST(req) {
     }
 
     const body = await req.json();
-    const projectId = body.project_id || null;
     const tenantId =
       caller.profile.role === "super_admin" && body.tenant_id
         ? body.tenant_id
@@ -50,34 +36,85 @@ export async function POST(req) {
       return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
     }
 
-    const rawRows = Array.isArray(body.leads)
-      ? body.leads
-      : parseCsvRows(body.csv_text || "");
+    const projectId = body.project_id || null;
+    const mappedRows = Array.isArray(body.rows) ? body.rows : [];
+    const newFieldDefs = Array.isArray(body.new_fields) ? body.new_fields : [];
 
-    const validRows = rawRows
-      .map((r) => ({
-        tenant_id: tenantId,
-        project_id: projectId,
-        name: String(r.name || "").trim(),
-        phone: String(r.phone || "").trim(),
-        email: r.email ? String(r.email).trim() : null,
-        status: "new",
-        custom_fields: r.custom_fields || {},
-        assigned_to: body.assigned_to || (caller.profile.role === "agent" ? caller.profile.id : null),
-      }))
-      .filter((r) => r.name && r.phone);
+    // 1. Auto-create any new project call_fields requested from extra CSV columns
+    const createdKeys = new Set();
+    for (const nf of newFieldDefs) {
+      const fieldKey = toKey(nf.field_key || nf.label);
+      const label = String(nf.label || toLabel(fieldKey)).trim();
+      const fieldType = String(nf.field_type || "text").trim();
+      if (!fieldKey || createdKeys.has(fieldKey)) continue;
+      createdKeys.add(fieldKey);
 
-    if (validRows.length === 0) {
+      let existingQ = supabase
+        .from("call_fields")
+        .select("id, field_key")
+        .eq("tenant_id", tenantId)
+        .eq("field_key", fieldKey);
+      existingQ = projectId ? existingQ.eq("project_id", projectId) : existingQ.is("project_id", null);
+
+      const { data: existingField } = await existingQ.maybeSingle();
+      if (!existingField) {
+        await supabase.from("call_fields").insert({
+          tenant_id: tenantId,
+          project_id: projectId,
+          field_key: fieldKey,
+          label,
+          field_type: fieldType,
+          is_required: false,
+        });
+      }
+    }
+
+    // 2. Build lead records
+    const insertPayloads = mappedRows
+      .map((r) => {
+        const name = String(r.name || "").trim();
+        const phone = String(r.phone || "").trim();
+        if (!name && !phone) return null;
+
+        return {
+          tenant_id: tenantId,
+          project_id: projectId,
+          name: name || `Lead ${phone}`,
+          phone: phone || "N/A",
+          email: r.email ? String(r.email).trim() : null,
+          notes: r.notes ? String(r.notes).trim() : null,
+          status: r.follow_up_at ? "follow_up" : r.status || "new",
+          follow_up_at: r.follow_up_at ? new Date(r.follow_up_at).toISOString() : null,
+          custom_fields:
+            r.custom_fields && typeof r.custom_fields === "object" ? r.custom_fields : {},
+        };
+      })
+      .filter(Boolean);
+
+    if (insertPayloads.length === 0) {
       return NextResponse.json(
-        { error: "No valid leads found. Include CSV headers name,phone (plus optional email or custom columns)." },
+        { error: "No valid leads found after mapping (name or phone is required)" },
         { status: 400 }
       );
     }
 
-    const { data: inserted, error } = await supabase.from("leads").insert(validRows).select();
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+    const { data: inserted, error: insErr } = await supabase
+      .from("leads")
+      .insert(insertPayloads)
+      .select();
 
-    return NextResponse.json({ uploaded_count: inserted?.length || 0, leads: inserted || [] }, { status: 201 });
+    if (insErr) {
+      return NextResponse.json({ error: insErr.message }, { status: 400 });
+    }
+
+    return NextResponse.json(
+      {
+        uploaded_count: (inserted || []).length,
+        created_fields_count: createdKeys.size,
+        leads: inserted || [],
+      },
+      { status: 201 }
+    );
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
