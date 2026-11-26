@@ -23,7 +23,7 @@ export default function FollowUpsSection({
   onDialLead,
 }) {
   const [projectFilter, setProjectFilter] = useState("");
-  const [timingFilter, setTimingFilter] = useState("all"); // "all" | "overdue" | "today" | "upcoming"
+  const [timingFilter, setTimingFilter] = useState("all");
   const [dispositionFilter, setDispositionFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [draftTimes, setDraftTimes] = useState({});
