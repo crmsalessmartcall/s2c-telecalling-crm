@@ -140,6 +140,32 @@ export default function HomePage() {
     "name,phone,email,city\nRahul Sharma,9876543210,rahul@example.com,Mumbai"
   );
 
+  // Point 5: Dialer & Reports state
+  const [callLogs, setCallLogs] = useState([]);
+  const [dialerState, setDialerState] = useState({
+    lead_id: "",
+    phone: "",
+    status: "connected",
+    disposition: "",
+    notes: "",
+    duration_seconds: 45,
+    follow_up_at: "",
+    custom_fields: {},
+    activeCallStartedAt: null,
+  });
+  const [reportData, setReportData] = useState({
+    summary: {
+      total_calls: 0,
+      connected_calls: 0,
+      avg_duration_seconds: 0,
+      total_leads: 0,
+      scheduled_followups: 0,
+    },
+    dispositions: {},
+    lead_statuses: {},
+    recent_calls: [],
+  });
+
   const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
 
   async function loadCampaignAndLeadsData(token, currentProfile, projectId = "", tenantScope = "") {
@@ -150,11 +176,17 @@ export default function HomePage() {
     }
 
     const qs = params.toString() ? `?${params.toString()}` : "";
-    const [cfgRes, leadsRes] = await Promise.all([
+    const [cfgRes, leadsRes, callsRes, repRes] = await Promise.all([
       safeJsonFetch(`/api/call-config${qs}`, {
         headers: { Authorization: `Bearer ${token}` },
       }),
       safeJsonFetch(`/api/leads${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      safeJsonFetch(`/api/calls${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      safeJsonFetch(`/api/reports${qs}`, {
         headers: { Authorization: `Bearer ${token}` },
       }),
     ]);
@@ -165,6 +197,23 @@ export default function HomePage() {
     }
     if (leadsRes.ok) {
       setLeads(leadsRes.data.leads || []);
+    }
+    if (callsRes.ok) {
+      setCallLogs(callsRes.data.calls || []);
+    }
+    if (repRes.ok) {
+      setReportData({
+        summary: repRes.data.summary || {
+          total_calls: 0,
+          connected_calls: 0,
+          avg_duration_seconds: 0,
+          total_leads: 0,
+          scheduled_followups: 0,
+        },
+        dispositions: repRes.data.dispositions || {},
+        lead_statuses: repRes.data.lead_statuses || {},
+        recent_calls: repRes.data.recent_calls || [],
+      });
     }
   }
 
@@ -231,6 +280,18 @@ export default function HomePage() {
           activeProj,
           role === "super_admin" ? selectedTenantScope : ""
         );
+      }
+    } else {
+      const repRes = await safeJsonFetch("/api/reports", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (repRes.ok) {
+        setReportData({
+          summary: repRes.data.summary || reportData.summary,
+          dispositions: repRes.data.dispositions || {},
+          lead_statuses: repRes.data.lead_statuses || {},
+          recent_calls: repRes.data.recent_calls || [],
+        });
       }
     }
   }
@@ -786,6 +847,82 @@ export default function HomePage() {
     }
 
     setStatusMessage("Lead updated.");
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  function handleStartSmartCall() {
+    if (!dialerState.phone.trim()) {
+      setStatusMessage("Select a lead or enter a phone number first.");
+      return;
+    }
+    const startedAt = new Date().toISOString();
+    setDialerState((prev) => ({
+      ...prev,
+      status: "connected",
+      activeCallStartedAt: startedAt,
+    }));
+    setStatusMessage(`SmartCall session started for ${dialerState.phone}.`);
+  }
+
+  function handleEndSmartCall() {
+    if (!dialerState.activeCallStartedAt) return;
+    const elapsedSec = Math.max(
+      1,
+      Math.round((Date.now() - new Date(dialerState.activeCallStartedAt).getTime()) / 1000)
+    );
+    setDialerState((prev) => ({
+      ...prev,
+      duration_seconds: elapsedSec,
+      activeCallStartedAt: null,
+    }));
+    setStatusMessage(`Call ended (${elapsedSec}s). Review disposition and click Log Call.`);
+  }
+
+  async function handleLogCall(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/calls", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        project_id: selectedProjectId || null,
+        lead_id: dialerState.lead_id || null,
+        phone: dialerState.phone,
+        status: dialerState.status,
+        disposition: dialerState.disposition || null,
+        notes: dialerState.notes || null,
+        duration_seconds: Number(dialerState.duration_seconds || 0),
+        follow_up_at: dialerState.follow_up_at
+          ? new Date(dialerState.follow_up_at).toISOString()
+          : null,
+        custom_fields: dialerState.custom_fields,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to log call.");
+      return;
+    }
+
+    setDialerState((prev) => ({
+      ...prev,
+      disposition: "",
+      notes: "",
+      follow_up_at: "",
+      activeCallStartedAt: null,
+    }));
+    setStatusMessage(`Logged call to ${res.data.call?.phone} (${res.data.call?.duration_seconds}s).`);
     await loadCampaignAndLeadsData(
       session.access_token,
       profile,
@@ -1758,17 +1895,288 @@ export default function HomePage() {
 
       {activeTab === "Dialer" && (
         <section>
-          <h3>Dialer Console</h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>
-            Shown only on the Dialer tab—never across all tabs (coming in Point 5).
-          </p>
+          <h3>SmartCall Dialer Console</h3>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+              gap: 16,
+              marginBottom: 24,
+            }}
+          >
+            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Dial & Log Call</h4>
+              <form onSubmit={handleLogCall} style={{ display: "grid", gap: 8 }}>
+                <label style={{ fontSize: 12 }}>
+                  Pick Lead (optional):
+                  <select
+                    value={dialerState.lead_id}
+                    onChange={(e) => {
+                      const pickedId = e.target.value;
+                      const found = leads.find((item) => item.id === pickedId);
+                      setDialerState((prev) => ({
+                        ...prev,
+                        lead_id: pickedId,
+                        phone: found?.phone || prev.phone,
+                      }));
+                    }}
+                    style={{ width: "100%", marginTop: 2 }}
+                  >
+                    <option value="">-- Manual Number --</option>
+                    {leads.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name} ({l.phone})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label style={{ fontSize: 12 }}>
+                  Phone Number:
+                  <input
+                    placeholder="e.g. 9876543210"
+                    value={dialerState.phone}
+                    onChange={(e) => setDialerState((prev) => ({ ...prev, phone: e.target.value }))}
+                    required
+                    style={{ width: "100%", marginTop: 2 }}
+                  />
+                </label>
+
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button type="button" onClick={handleStartSmartCall} disabled={Boolean(dialerState.activeCallStartedAt)}>
+                    Start Call
+                  </button>
+                  <button type="button" onClick={handleEndSmartCall} disabled={!dialerState.activeCallStartedAt}>
+                    End Call
+                  </button>
+                  {dialerState.activeCallStartedAt && (
+                    <span style={{ fontSize: 12, color: "#166534", fontWeight: "bold", alignSelf: "center" }}>
+                      Call in progress...
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: 8 }}>
+                  <label style={{ fontSize: 12, flex: 1 }}>
+                    Call Status:
+                    <select
+                      value={dialerState.status}
+                      onChange={(e) => setDialerState((prev) => ({ ...prev, status: e.target.value }))}
+                      style={{ width: "100%", marginTop: 2 }}
+                    >
+                      <option value="connected">connected</option>
+                      <option value="completed">completed</option>
+                      <option value="no_answer">no_answer</option>
+                      <option value="busy">busy</option>
+                    </select>
+                  </label>
+                  <label style={{ fontSize: 12, flex: 1 }}>
+                    Duration (sec):
+                    <input
+                      type="number"
+                      min="0"
+                      value={dialerState.duration_seconds}
+                      onChange={(e) =>
+                        setDialerState((prev) => ({ ...prev, duration_seconds: e.target.value }))
+                      }
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                </div>
+
+                <label style={{ fontSize: 12 }}>
+                  Disposition:
+                  <select
+                    value={dialerState.disposition}
+                    onChange={(e) => setDialerState((prev) => ({ ...prev, disposition: e.target.value }))}
+                    style={{ width: "100%", marginTop: 2 }}
+                  >
+                    <option value="">-- Select Disposition --</option>
+                    {dispositions.map((d) => (
+                      <option key={d.id} value={d.name}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {callFields.map((cf) => (
+                  <label key={cf.id} style={{ fontSize: 12 }}>
+                    {cf.label}:
+                    <input
+                      type={cf.field_type === "number" ? "number" : cf.field_type === "date" ? "date" : "text"}
+                      value={dialerState.custom_fields[cf.field_key] || ""}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setDialerState((prev) => ({
+                          ...prev,
+                          custom_fields: {
+                            ...prev.custom_fields,
+                            [cf.field_key]: val,
+                          },
+                        }));
+                      }}
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                ))}
+
+                <label style={{ fontSize: 12 }}>
+                  Schedule Follow-Up (optional):
+                  <input
+                    type="datetime-local"
+                    value={dialerState.follow_up_at}
+                    onChange={(e) => setDialerState((prev) => ({ ...prev, follow_up_at: e.target.value }))}
+                    style={{ width: "100%", marginTop: 2 }}
+                  />
+                </label>
+
+                <label style={{ fontSize: 12 }}>
+                  Call Notes:
+                  <textarea
+                    rows={2}
+                    value={dialerState.notes}
+                    onChange={(e) => setDialerState((prev) => ({ ...prev, notes: e.target.value }))}
+                    style={{ width: "100%", marginTop: 2 }}
+                  />
+                </label>
+
+                <button type="submit">Log Call</button>
+              </form>
+            </div>
+
+            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Recent Call Logs ({callLogs.length})</h4>
+              <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th>Phone</th>
+                    <th>Status</th>
+                    <th>Disposition</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {callLogs.slice(0, 15).map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.phone}</td>
+                      <td>{c.status}</td>
+                      <td>{c.disposition || "-"}</td>
+                      <td>{c.duration_seconds || 0}s</td>
+                    </tr>
+                  ))}
+                  {callLogs.length === 0 && (
+                    <tr>
+                      <td colSpan="4">No calls logged yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </section>
       )}
 
       {activeTab === "Reports" && (
         <section>
-          <h3>Reports</h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>Call activity and performance reporting view.</p>
+          <h3>Call & Conversion Reports</h3>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+              gap: 12,
+              marginBottom: 20,
+            }}
+          >
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#64748b" }}>Total Calls</div>
+              <strong style={{ fontSize: 20 }}>{reportData.summary.total_calls}</strong>
+            </div>
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#64748b" }}>Connected Calls</div>
+              <strong style={{ fontSize: 20 }}>{reportData.summary.connected_calls}</strong>
+            </div>
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#64748b" }}>Avg Duration</div>
+              <strong style={{ fontSize: 20 }}>{reportData.summary.avg_duration_seconds}s</strong>
+            </div>
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#64748b" }}>Total Leads</div>
+              <strong style={{ fontSize: 20 }}>{reportData.summary.total_leads}</strong>
+            </div>
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: "#64748b" }}>Follow-Ups Scheduled</div>
+              <strong style={{ fontSize: 20 }}>{reportData.summary.scheduled_followups}</strong>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+              gap: 12,
+              marginBottom: 20,
+            }}
+          >
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Calls by Disposition</h4>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {Object.entries(reportData.dispositions || {}).map(([k, v]) => (
+                  <li key={k}>
+                    {k}: <strong>{v}</strong>
+                  </li>
+                ))}
+                {Object.keys(reportData.dispositions || {}).length === 0 && <li>No disposition data yet.</li>}
+              </ul>
+            </div>
+
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Leads by Status</h4>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {Object.entries(reportData.lead_statuses || {}).map(([k, v]) => (
+                  <li key={k}>
+                    {k}: <strong>{v}</strong>
+                  </li>
+                ))}
+                {Object.keys(reportData.lead_statuses || {}).length === 0 && <li>No lead status data yet.</li>}
+              </ul>
+            </div>
+          </div>
+
+          <h4>Recent Call Activity</h4>
+          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Phone</th>
+                <th>Provider</th>
+                <th>Status</th>
+                <th>Disposition</th>
+                <th>Duration</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(reportData.recent_calls || []).map((c) => (
+                <tr key={c.id}>
+                  <td>{c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</td>
+                  <td>{c.phone}</td>
+                  <td>{c.provider || "smartcall"}</td>
+                  <td>{c.status}</td>
+                  <td>{c.disposition || "-"}</td>
+                  <td>{c.duration_seconds || 0}s</td>
+                  <td>{c.notes || "-"}</td>
+                </tr>
+              ))}
+              {(!reportData.recent_calls || reportData.recent_calls.length === 0) && (
+                <tr>
+                  <td colSpan="7">No call records available yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </section>
       )}
     </div>
