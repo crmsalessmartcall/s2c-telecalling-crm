@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
 import { computeActiveSeats } from "@/app/api/admin/tenants/route";
 
+function isPeriodActiveAt(period, nowMs = Date.now()) {
+  const startMs = period.starts_at ? new Date(period.starts_at).getTime() : -Infinity;
+  const endMs = period.ends_at ? new Date(period.ends_at).getTime() : Infinity;
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return false;
+  return startMs <= nowMs && nowMs < endMs;
+}
+
 export async function GET(req) {
   try {
     const supabase = getServiceSupabase();
@@ -14,20 +21,34 @@ export async function GET(req) {
     }
 
     const tenantId = caller.profile.tenant_id;
-    const [{ data: tenant }, { data: users, error: uErr }] = await Promise.all([
-      supabase.from("tenants").select("*").eq("id", tenantId).single(),
-      supabase
-        .from("profiles")
-        .select("id, full_name, email, role, is_active, created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: true }),
-    ]);
+    const [{ data: tenant }, { data: users, error: uErr }, { data: periods, error: lpErr }] =
+      await Promise.all([
+        supabase.from("tenants").select("*").eq("id", tenantId).single(),
+        supabase
+          .from("profiles")
+          .select("id, full_name, email, role, is_active, created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: true }),
+        supabase
+          .from("license_periods")
+          .select("id, tenant_id, seat_count, starts_at, ends_at, reason, created_at")
+          .eq("tenant_id", tenantId)
+          .order("starts_at", { ascending: false }),
+      ]);
 
     if (uErr) return NextResponse.json({ error: uErr.message }, { status: 400 });
 
     const activeSeats = await computeActiveSeats(supabase, tenantId);
     const list = users || [];
     const usedLicenses = list.filter((u) => u.is_active).length;
+    const nowMs = Date.now();
+
+    const licenseHistory = lpErr
+      ? []
+      : (periods || []).map((p) => ({
+          ...p,
+          is_active_now: isPeriodActiveAt(p, nowMs),
+        }));
 
     return NextResponse.json({
       tenant: { ...tenant, max_licenses: activeSeats },
@@ -35,6 +56,7 @@ export async function GET(req) {
       used_licenses: usedLicenses,
       remaining_licenses: Math.max(0, activeSeats - usedLicenses),
       over_capacity: Math.max(0, usedLicenses - activeSeats),
+      license_periods: licenseHistory,
       users: list,
     });
   } catch (err) {
@@ -62,6 +84,12 @@ export async function POST(req) {
     if (!fullName || !email || !password) {
       return NextResponse.json(
         { error: "full_name, email, and password are required" },
+        { status: 400 }
+      );
+    }
+    if (password.length < 6) {
+      return NextResponse.json(
+        { error: "Password must be at least 6 characters" },
         { status: 400 }
       );
     }
@@ -147,14 +175,14 @@ export async function PATCH(req) {
 
     const body = await req.json();
     const userId = body.user_id;
-    if (!userId || typeof body.is_active !== "boolean") {
-      return NextResponse.json({ error: "user_id and boolean is_active are required" }, { status: 400 });
+    if (!userId) {
+      return NextResponse.json({ error: "user_id is required" }, { status: 400 });
     }
 
     const tenantId = caller.profile.tenant_id;
     const { data: target } = await supabase
       .from("profiles")
-      .select("id, tenant_id, is_active, role")
+      .select("id, tenant_id, email, is_active, role")
       .eq("id", userId)
       .eq("tenant_id", tenantId)
       .maybeSingle();
@@ -163,7 +191,34 @@ export async function PATCH(req) {
       return NextResponse.json({ error: "User not found in your tenant" }, { status: 404 });
     }
 
-    // If activating a previously disabled user, verify seat availability
+    // Reset password directly from UI
+    if (body.action === "reset_password" || typeof body.password === "string") {
+      const nextPassword = String(body.password || "");
+      if (nextPassword.length < 6) {
+        return NextResponse.json(
+          { error: "New password must be at least 6 characters" },
+          { status: 400 }
+        );
+      }
+
+      const { error: pwErr } = await supabase.auth.admin.updateUserById(userId, {
+        password: nextPassword,
+      });
+
+      if (pwErr) {
+        return NextResponse.json({ error: pwErr.message }, { status: 400 });
+      }
+
+      return NextResponse.json({ ok: true, password_reset: true, user_id: userId });
+    }
+
+    if (typeof body.is_active !== "boolean") {
+      return NextResponse.json(
+        { error: "Provide boolean is_active or a new password" },
+        { status: 400 }
+      );
+    }
+
     if (body.is_active && !target.is_active) {
       const activeSeats = await computeActiveSeats(supabase, tenantId);
       const { data: members } = await supabase
