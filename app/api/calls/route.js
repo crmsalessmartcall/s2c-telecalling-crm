@@ -20,7 +20,7 @@ export async function GET(req) {
       .from("call_logs")
       .select("*")
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(200);
 
     if (tenantId) {
       query = query.eq("tenant_id", tenantId);
@@ -103,9 +103,26 @@ export async function POST(req) {
     }
 
     if (body.lead_id) {
+      const { data: existingLead } = await supabase
+        .from("leads")
+        .select("id, custom_fields, notes")
+        .eq("id", body.lead_id)
+        .eq("tenant_id", tenantId)
+        .maybeSingle();
+
+      const mergedCustomFields = {
+        ...(existingLead?.custom_fields && typeof existingLead.custom_fields === "object"
+          ? existingLead.custom_fields
+          : {}),
+        ...customFields,
+      };
+
       const leadPatch = {
         last_called_at: nowIso,
+        custom_fields: mergedCustomFields,
       };
+
+      if (notes) leadPatch.notes = notes;
       if (disposition) leadPatch.disposition = disposition;
       if (followUpAt) {
         leadPatch.follow_up_at = followUpAt;
