@@ -1,7 +1,35 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
 
-const STANDARD_KEYS = ["full_name", "phone", "email", "company", "city"];
+function parseCsvRows(csvText) {
+  const lines = String(csvText || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
+  const nameIdx = headers.findIndex((h) => ["name", "full_name", "lead_name", "customer"].includes(h));
+  const phoneIdx = headers.findIndex((h) => ["phone", "mobile", "phone_number", "contact"].includes(h));
+  const emailIdx = headers.findIndex((h) => ["email", "email_address"].includes(h));
+
+  return lines.slice(1).map((line) => {
+    const cols = line.split(",").map((c) => c.trim());
+    const customFields = {};
+    headers.forEach((h, idx) => {
+      if (![nameIdx, phoneIdx, emailIdx].includes(idx) && cols[idx] !== undefined) {
+        customFields[h] = cols[idx];
+      }
+    });
+
+    return {
+      name: nameIdx >= 0 ? cols[nameIdx] : cols[0] || "",
+      phone: phoneIdx >= 0 ? cols[phoneIdx] : cols[1] || "",
+      email: emailIdx >= 0 ? cols[emailIdx] || null : null,
+      custom_fields: customFields,
+    };
+  });
+}
 
 export async function POST(req) {
   try {
@@ -11,83 +39,45 @@ export async function POST(req) {
       return NextResponse.json({ error: caller.error }, { status: caller.status });
     }
 
-    if (!["tenant_admin", "supervisor", "team_leader"].includes(caller.profile.role)) {
-      return NextResponse.json({ error: "Insufficient permissions to upload leads" }, { status: 403 });
+    const body = await req.json();
+    const projectId = body.project_id || null;
+    const tenantId =
+      caller.profile.role === "super_admin" && body.tenant_id
+        ? body.tenant_id
+        : caller.profile.tenant_id;
+
+    if (!tenantId) {
+      return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
     }
 
-    const { project_id, rows, mapping, default_assigned_to = null } = await req.json();
+    const rawRows = Array.isArray(body.leads)
+      ? body.leads
+      : parseCsvRows(body.csv_text || "");
 
-    if (!project_id || !Array.isArray(rows) || rows.length === 0 || !mapping) {
-      return NextResponse.json(
-        { error: "project_id, non-empty rows, and field mapping are required" },
-        { status: 400 }
-      );
-    }
-
-    const tenantId = caller.profile.tenant_id;
-    const prepared = [];
-    let skipped = 0;
-
-    for (const row of rows) {
-      const leadObj = {
+    const validRows = rawRows
+      .map((r) => ({
         tenant_id: tenantId,
-        project_id,
-        full_name: "",
-        phone: "",
-        email: "",
-        company: "",
-        city: "",
+        project_id: projectId,
+        name: String(r.name || "").trim(),
+        phone: String(r.phone || "").trim(),
+        email: r.email ? String(r.email).trim() : null,
         status: "new",
-        assigned_to: default_assigned_to || null,
-        custom_data: {},
-      };
+        custom_fields: r.custom_fields || {},
+        assigned_to: body.assigned_to || (caller.profile.role === "agent" ? caller.profile.id : null),
+      }))
+      .filter((r) => r.name && r.phone);
 
-      for (const [csvHeader, targetField] of Object.entries(mapping)) {
-        if (!targetField || targetField === "__ignore__") continue;
-        const val = row[csvHeader] !== undefined && row[csvHeader] !== null ? String(row[csvHeader]).trim() : "";
-        if (!val) continue;
-
-        if (STANDARD_KEYS.includes(targetField)) {
-          leadObj[targetField] = val;
-        } else {
-          leadObj.custom_data[targetField] = val;
-        }
-      }
-
-      const cleanPhone = leadObj.phone.replace(/[^\d+]/g, "");
-      if (!cleanPhone) {
-        skipped++;
-        continue;
-      }
-      leadObj.phone = cleanPhone;
-      if (!leadObj.full_name) leadObj.full_name = "Unknown Lead";
-
-      prepared.push(leadObj);
-    }
-
-    if (prepared.length === 0) {
+    if (validRows.length === 0) {
       return NextResponse.json(
-        { error: "No valid leads found. Make sure the Phone column is mapped and non-empty." },
+        { error: "No valid leads found. Include CSV headers name,phone (plus optional email or custom columns)." },
         { status: 400 }
       );
     }
 
-    const { data: inserted, error: insErr } = await supabase
-      .from("leads")
-      .insert(prepared)
-      .select("id");
+    const { data: inserted, error } = await supabase.from("leads").insert(validRows).select();
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
-    if (insErr) {
-      return NextResponse.json({ error: insErr.message }, { status: 400 });
-    }
-
-    return NextResponse.json(
-      {
-        uploaded_count: inserted.length,
-        skipped_count: skipped,
-      },
-      { status: 201 }
-    );
+    return NextResponse.json({ uploaded_count: inserted?.length || 0, leads: inserted || [] }, { status: 201 });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
