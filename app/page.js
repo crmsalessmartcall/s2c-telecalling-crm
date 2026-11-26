@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import PortalHeader from "@/app/components/PortalHeader";
 
@@ -51,6 +51,67 @@ function LicensePeriodBadge({ period }) {
       {label}
     </span>
   );
+}
+
+function getLeadCustomFields(lead) {
+  if (lead?.custom_fields && typeof lead.custom_fields === "object") {
+    return lead.custom_fields;
+  }
+  return {};
+}
+
+function matchesLeadFilters(lead, filters) {
+  if (filters.status && filters.status !== "all" && (lead.status || "new") !== filters.status) {
+    return false;
+  }
+
+  if (filters.disposition && filters.disposition !== "all") {
+    if (filters.disposition === "__none__") {
+      if (lead.disposition) return false;
+    } else if ((lead.disposition || "") !== filters.disposition) {
+      return false;
+    }
+  }
+
+  const hasFollowUp = Boolean(lead.follow_up_at);
+  const wasCalled = Boolean(lead.last_called_at) || (lead.status && lead.status !== "new");
+  if (filters.callKind === "fresh" && (hasFollowUp || wasCalled)) {
+    return false;
+  }
+  if (filters.callKind === "followup" && !hasFollowUp && (lead.status || "") !== "follow_up") {
+    return false;
+  }
+  if (filters.callKind === "fresh_and_followup") {
+    const isFresh = !hasFollowUp && !wasCalled;
+    const isFollowup = hasFollowUp || (lead.status || "") === "follow_up";
+    if (!isFresh && !isFollowup) return false;
+  }
+
+  if (filters.paramKey && filters.paramValue.trim()) {
+    const needle = filters.paramValue.trim().toLowerCase();
+    const cf = getLeadCustomFields(lead);
+    const val =
+      filters.paramKey === "city"
+        ? cf.city ?? lead.city ?? ""
+        : cf[filters.paramKey] ?? lead[filters.paramKey] ?? "";
+    if (!String(val).toLowerCase().includes(needle)) {
+      return false;
+    }
+  }
+
+  if (filters.search && filters.search.trim()) {
+    const q = filters.search.trim().toLowerCase();
+    const cfText = Object.values(getLeadCustomFields(lead)).join(" ").toLowerCase();
+    const hit =
+      String(lead.name || "").toLowerCase().includes(q) ||
+      String(lead.phone || "").toLowerCase().includes(q) ||
+      String(lead.disposition || "").toLowerCase().includes(q) ||
+      String(lead.status || "").toLowerCase().includes(q) ||
+      cfText.includes(q);
+    if (!hit) return false;
+  }
+
+  return true;
 }
 
 async function safeJsonFetch(url, options = {}) {
@@ -116,10 +177,11 @@ export default function HomePage() {
     role: "agent",
   });
 
-  // Campaigns, Call Config, Leads & Follow-Ups state
+  // Campaigns, Sub-Tabs ("calling_data" | "settings"), Call Config & Leads
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [selectedTenantScope, setSelectedTenantScope] = useState("");
+  const [campaignSubTab, setCampaignSubTab] = useState("calling_data");
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
 
   const [callFields, setCallFields] = useState([]);
@@ -128,31 +190,53 @@ export default function HomePage() {
   const [dispositionForm, setDispositionForm] = useState({ name: "", requires_followup: false });
 
   const [leads, setLeads] = useState([]);
-  const [leadSearch, setLeadSearch] = useState("");
+  const [leadFilter, setLeadFilter] = useState({
+    status: "all",
+    disposition: "all",
+    callKind: "all",
+    paramKey: "",
+    paramValue: "",
+    search: "",
+  });
+  const [bulkFollowUpAt, setBulkFollowUpAt] = useState("");
   const [leadForm, setLeadForm] = useState({
     name: "",
     phone: "",
     email: "",
     notes: "",
     follow_up_at: "",
+    custom_fields: {},
   });
   const [csvText, setCsvText] = useState(
     "name,phone,email,city\nRahul Sharma,9876543210,rahul@example.com,Mumbai"
   );
 
-  // Point 5: Dialer & Reports state
+  // Dialer Queue, Active Session & Paginated Expandable Call Logs
   const [callLogs, setCallLogs] = useState([]);
-  const [dialerState, setDialerState] = useState({
+  const [callLogPage, setCallLogPage] = useState(1);
+  const [expandedCallIds, setExpandedCallIds] = useState({});
+  const [dialerFilter, setDialerFilter] = useState({
+    project_id: "",
+    status: "all",
+    disposition: "all",
+    callKind: "all",
+    paramKey: "",
+    paramValue: "",
+  });
+  const [queueActive, setQueueActive] = useState(false);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [dialerForm, setDialerForm] = useState({
     lead_id: "",
     phone: "",
     status: "connected",
     disposition: "",
     notes: "",
-    duration_seconds: 45,
+    duration_seconds: 0,
     follow_up_at: "",
     custom_fields: {},
-    activeCallStartedAt: null,
+    callStartedAt: null,
   });
+
   const [reportData, setReportData] = useState({
     summary: {
       total_calls: 0,
@@ -167,6 +251,71 @@ export default function HomePage() {
   });
 
   const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
+
+  // Only active campaigns are shown in campaign selectors and lists
+  const activeProjects = useMemo(
+    () =>
+      (projects || []).filter((p) => {
+        const st = String(p.status || "active").toLowerCase();
+        return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
+      }),
+    [projects]
+  );
+
+  const activeCampaign = useMemo(
+    () => activeProjects.find((p) => p.id === selectedProjectId) || null,
+    [activeProjects, selectedProjectId]
+  );
+
+  const paramOptions = useMemo(() => {
+    const base = [{ key: "city", label: "City (city)" }];
+    for (const cf of callFields || []) {
+      if (cf.field_key && cf.field_key !== "city") {
+        base.push({ key: cf.field_key, label: `${cf.label} (${cf.field_key})` });
+      }
+    }
+    return base;
+  }, [callFields]);
+
+  const filteredCallingLeads = useMemo(
+    () => (leads || []).filter((l) => matchesLeadFilters(l, leadFilter)),
+    [leads, leadFilter]
+  );
+
+  const dialerQueueLeads = useMemo(() => {
+    const pool = dialerFilter.project_id
+      ? (leads || []).filter((l) => l.project_id === dialerFilter.project_id)
+      : leads || [];
+    return pool.filter((l) => matchesLeadFilters(l, dialerFilter));
+  }, [leads, dialerFilter]);
+
+  const currentQueueLead = useMemo(() => {
+    if (!queueActive || dialerQueueLeads.length === 0) return null;
+    const safeIdx = Math.min(queueIndex, dialerQueueLeads.length - 1);
+    return dialerQueueLeads[safeIdx] || null;
+  }, [queueActive, dialerQueueLeads, queueIndex]);
+
+  const CALLS_PER_PAGE = 10;
+  const totalCallPages = Math.max(1, Math.ceil((callLogs || []).length / CALLS_PER_PAGE));
+  const paginatedCallLogs = useMemo(() => {
+    const start = (callLogPage - 1) * CALLS_PER_PAGE;
+    return (callLogs || []).slice(start, start + CALLS_PER_PAGE);
+  }, [callLogs, callLogPage]);
+
+  function bindLeadToDialer(lead) {
+    if (!lead) return;
+    setDialerForm({
+      lead_id: lead.id,
+      phone: lead.phone || "",
+      status: "connected",
+      disposition: lead.disposition || "",
+      notes: lead.notes || "",
+      duration_seconds: 0,
+      follow_up_at: lead.follow_up_at ? String(lead.follow_up_at).slice(0, 16) : "",
+      custom_fields: { ...getLeadCustomFields(lead) },
+      callStartedAt: null,
+    });
+  }
 
   async function loadCampaignAndLeadsData(token, currentProfile, projectId = "", tenantScope = "") {
     const params = new URLSearchParams();
@@ -200,6 +349,7 @@ export default function HomePage() {
     }
     if (callsRes.ok) {
       setCallLogs(callsRes.data.calls || []);
+      setCallLogPage(1);
     }
     if (repRes.ok) {
       setReportData({
@@ -267,13 +417,21 @@ export default function HomePage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (pRes.ok) {
-        const projList = pRes.data.projects || [];
-        setProjects(projList);
+        const allProjects = pRes.data.projects || [];
+        const onlyActive = allProjects.filter((p) => {
+          const st = String(p.status || "active").toLowerCase();
+          return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
+        });
+        setProjects(onlyActive);
         const activeProj =
-          selectedProjectId && projList.some((p) => p.id === selectedProjectId)
+          selectedProjectId && onlyActive.some((p) => p.id === selectedProjectId)
             ? selectedProjectId
-            : projList[0]?.id || "";
+            : onlyActive[0]?.id || "";
         setSelectedProjectId(activeProj);
+        setDialerFilter((prev) => ({
+          ...prev,
+          project_id: prev.project_id || activeProj,
+        }));
         await loadCampaignAndLeadsData(
           token,
           currentProfile,
@@ -676,6 +834,7 @@ export default function HomePage() {
       body: JSON.stringify({
         name: projectForm.name,
         description: projectForm.description,
+        status: "active",
         tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
@@ -686,7 +845,7 @@ export default function HomePage() {
     }
 
     setProjectForm({ name: "", description: "" });
-    setStatusMessage(`Created campaign "${res.data.project?.name}".`);
+    setStatusMessage(`Created active campaign "${res.data.project?.name}".`);
     if (res.data.project?.id) {
       setSelectedProjectId(res.data.project.id);
     }
@@ -786,7 +945,7 @@ export default function HomePage() {
       return;
     }
 
-    setLeadForm({ name: "", phone: "", email: "", notes: "", follow_up_at: "" });
+    setLeadForm({ name: "", phone: "", email: "", notes: "", follow_up_at: "", custom_fields: {} });
     setStatusMessage(`Added lead "${res.data.lead?.name}".`);
     await loadCampaignAndLeadsData(
       session.access_token,
@@ -855,38 +1014,140 @@ export default function HomePage() {
     );
   }
 
-  function handleStartSmartCall() {
-    if (!dialerState.phone.trim()) {
-      setStatusMessage("Select a lead or enter a phone number first.");
+  async function handleBulkSetFollowUp() {
+    if (!session?.access_token || !bulkFollowUpAt || filteredCallingLeads.length === 0) return;
+    setStatusMessage("");
+
+    const ids = filteredCallingLeads.map((l) => l.id);
+    const res = await safeJsonFetch("/api/leads", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        lead_ids: ids,
+        follow_up_at: new Date(bulkFollowUpAt).toISOString(),
+        status: "follow_up",
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to apply bulk follow-up.");
       return;
     }
-    const startedAt = new Date().toISOString();
-    setDialerState((prev) => ({
+
+    setStatusMessage(`Set follow-up on ${ids.length} filtered lead(s).`);
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  async function handleBulkDeleteFilteredLeads() {
+    if (!session?.access_token || filteredCallingLeads.length === 0) return;
+    const count = filteredCallingLeads.length;
+    if (typeof window !== "undefined" && !window.confirm(`Delete ${count} filtered lead(s)?`)) {
+      return;
+    }
+
+    setStatusMessage("");
+    const ids = filteredCallingLeads.map((l) => l.id);
+    const res = await safeJsonFetch("/api/leads", {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        lead_ids: ids,
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to delete filtered leads.");
+      return;
+    }
+
+    setStatusMessage(`Deleted ${count} filtered lead(s).`);
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  function handleApplyDialerQueue(e) {
+    e?.preventDefault();
+    if (dialerQueueLeads.length === 0) {
+      setQueueActive(false);
+      setQueueIndex(0);
+      setStatusMessage("No leads match the selected dialer filters.");
+      return;
+    }
+    setQueueActive(true);
+    setQueueIndex(0);
+    bindLeadToDialer(dialerQueueLeads[0]);
+    setStatusMessage(
+      `Dialer queue ready: ${dialerQueueLeads.length} lead(s) matched. Showing lead 1 of ${dialerQueueLeads.length}.`
+    );
+  }
+
+  function handleStartCall() {
+    if (!dialerForm.phone.trim()) {
+      setStatusMessage("Enter or select a phone number before starting a call.");
+      return;
+    }
+    setDialerForm((prev) => ({
       ...prev,
       status: "connected",
-      activeCallStartedAt: startedAt,
+      callStartedAt: new Date().toISOString(),
     }));
-    setStatusMessage(`SmartCall session started for ${dialerState.phone}.`);
+    setStatusMessage(`Call started for ${dialerForm.phone}.`);
   }
 
-  function handleEndSmartCall() {
-    if (!dialerState.activeCallStartedAt) return;
-    const elapsedSec = Math.max(
-      1,
-      Math.round((Date.now() - new Date(dialerState.activeCallStartedAt).getTime()) / 1000)
-    );
-    setDialerState((prev) => ({
+  function handleEndCall() {
+    setDialerForm((prev) => {
+      const elapsed = prev.callStartedAt
+        ? Math.max(1, Math.round((Date.now() - new Date(prev.callStartedAt).getTime()) / 1000))
+        : prev.duration_seconds || 15;
+      return {
+        ...prev,
+        duration_seconds: elapsed,
+        callStartedAt: null,
+      };
+    });
+    setStatusMessage("Call ended. Set disposition or follow-up, then click Save & Next or Save & Stop.");
+  }
+
+  function handleCancelCall() {
+    setDialerForm((prev) => ({
       ...prev,
-      duration_seconds: elapsedSec,
-      activeCallStartedAt: null,
+      callStartedAt: null,
+      duration_seconds: 0,
+      status: "no_answer",
     }));
-    setStatusMessage(`Call ended (${elapsedSec}s). Review disposition and click Log Call.`);
+    setStatusMessage("Active call cancelled (not saved).");
   }
 
-  async function handleLogCall(e) {
-    e.preventDefault();
+  async function persistDialerCall({ moveToNext }) {
     if (!session?.access_token) return;
+    if (!dialerForm.phone.trim()) {
+      setStatusMessage("Phone number is required to save a call log.");
+      return;
+    }
+
     setStatusMessage("");
+    const effectiveProjectId = dialerFilter.project_id || currentQueueLead?.project_id || selectedProjectId || null;
+
+    const computedDuration = dialerForm.callStartedAt
+      ? Math.max(1, Math.round((Date.now() - new Date(dialerForm.callStartedAt).getTime()) / 1000))
+      : Number(dialerForm.duration_seconds || 0);
 
     const res = await safeJsonFetch("/api/calls", {
       method: "POST",
@@ -896,39 +1157,50 @@ export default function HomePage() {
       },
       body: JSON.stringify({
         tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        project_id: selectedProjectId || null,
-        lead_id: dialerState.lead_id || null,
-        phone: dialerState.phone,
-        status: dialerState.status,
-        disposition: dialerState.disposition || null,
-        notes: dialerState.notes || null,
-        duration_seconds: Number(dialerState.duration_seconds || 0),
-        follow_up_at: dialerState.follow_up_at
-          ? new Date(dialerState.follow_up_at).toISOString()
+        project_id: effectiveProjectId,
+        lead_id: dialerForm.lead_id || currentQueueLead?.id || null,
+        phone: dialerForm.phone.trim(),
+        status: dialerForm.status,
+        disposition: dialerForm.disposition || null,
+        notes: dialerForm.notes || null,
+        duration_seconds: computedDuration,
+        follow_up_at: dialerForm.follow_up_at
+          ? new Date(dialerForm.follow_up_at).toISOString()
           : null,
-        custom_fields: dialerState.custom_fields,
+        custom_fields: dialerForm.custom_fields,
       }),
     });
 
     if (!res.ok) {
-      setStatusMessage(res.data.error || "Failed to log call.");
+      setStatusMessage(res.data.error || "Failed to save call log.");
       return;
     }
 
-    setDialerState((prev) => ({
-      ...prev,
-      disposition: "",
-      notes: "",
-      follow_up_at: "",
-      activeCallStartedAt: null,
-    }));
-    setStatusMessage(`Logged call to ${res.data.call?.phone} (${res.data.call?.duration_seconds}s).`);
     await loadCampaignAndLeadsData(
       session.access_token,
       profile,
       selectedProjectId,
       profile.role === "super_admin" ? selectedTenantScope : ""
     );
+
+    if (moveToNext && queueActive && dialerQueueLeads.length > 0) {
+      const nextIdx = queueIndex + 1;
+      if (nextIdx < dialerQueueLeads.length) {
+        setQueueIndex(nextIdx);
+        bindLeadToDialer(dialerQueueLeads[nextIdx]);
+        setStatusMessage(
+          `Saved call & moved to next lead (${nextIdx + 1} of ${dialerQueueLeads.length}): ${dialerQueueLeads[nextIdx].name}.`
+        );
+      } else {
+        setQueueActive(false);
+        setQueueIndex(0);
+        setStatusMessage("Saved call. You have reached the end of the filtered calling queue.");
+      }
+    } else {
+      setQueueActive(false);
+      setDialerForm((prev) => ({ ...prev, callStartedAt: null, notes: "", follow_up_at: "" }));
+      setStatusMessage("Call saved and dialer stopped.");
+    }
   }
 
   const filteredTenants = tenants.filter((t) => {
@@ -940,17 +1212,6 @@ export default function HomePage() {
     const stateValue = t.effective_state || t.status || "active";
     if (filterState !== "all" && stateValue !== filterState) return false;
     return true;
-  });
-
-  const filteredLeads = leads.filter((l) => {
-    if (!leadSearch.trim()) return true;
-    const q = leadSearch.trim().toLowerCase();
-    return (
-      String(l.name || "").toLowerCase().includes(q) ||
-      String(l.phone || "").toLowerCase().includes(q) ||
-      String(l.disposition || "").toLowerCase().includes(q) ||
-      String(l.status || "").toLowerCase().includes(q)
-    );
   });
 
   const followupLeads = leads.filter((l) => Boolean(l.follow_up_at));
@@ -996,7 +1257,7 @@ export default function HomePage() {
   }
 
   return (
-    <div style={{ maxWidth: 1180, margin: "24px auto", padding: 16, fontFamily: "sans-serif" }}>
+    <div style={{ maxWidth: 1220, margin: "24px auto", padding: 16, fontFamily: "sans-serif" }}>
       <PortalHeader
         profile={profile}
         tabs={allowedTabs}
@@ -1192,7 +1453,7 @@ export default function HomePage() {
                     />
                   </label>
                   <label style={{ fontSize: 12 }}>
-                    Custom Start Date/Time (optional—use a future date for Upcoming):
+                    Custom Start Date/Time (optional):
                     <input
                       type="datetime-local"
                       value={seatBlockForm.starts_at}
@@ -1201,7 +1462,7 @@ export default function HomePage() {
                     />
                   </label>
                   <label style={{ fontSize: 12 }}>
-                    Custom End Date/Time (optional—overrides duration months):
+                    Custom End Date/Time (optional):
                     <input
                       type="datetime-local"
                       value={seatBlockForm.ends_at}
@@ -1212,7 +1473,6 @@ export default function HomePage() {
                   <label style={{ fontSize: 12 }}>
                     Reason / Plan Note:
                     <input
-                      placeholder="e.g. 1-month pack (3 users) or 6-month pack (2 users)"
                       value={seatBlockForm.reason}
                       onChange={(e) => setSeatBlockForm((f) => ({ ...f, reason: e.target.value }))}
                       style={{ width: "100%", marginTop: 2 }}
@@ -1403,23 +1663,6 @@ export default function HomePage() {
             </button>
           </div>
 
-          {licenseInfo.overCapacity > 0 && (
-            <div
-              style={{
-                padding: 10,
-                marginBottom: 14,
-                borderRadius: 6,
-                background: "#fef2f2",
-                border: "1px solid #fecaca",
-                color: "#991b1b",
-                fontSize: 13,
-              }}
-            >
-              Active seats are exceeded by <strong>{licenseInfo.overCapacity}</strong> user(s). Disable or
-              delete users below so remaining active team members can continue working, or request more seats.
-            </div>
-          )}
-
           {showAddUserForm && (
             <div style={{ marginBottom: 20, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
               <h4 style={{ marginTop: 0 }}>Add Team Member & Set Password</h4>
@@ -1493,7 +1736,6 @@ export default function HomePage() {
                     >
                       Reset Password
                     </button>
-
                     {u.id !== profile.id && (
                       <>
                         <button
@@ -1508,7 +1750,6 @@ export default function HomePage() {
                         </button>
                       </>
                     )}
-
                     {resetPasswordUserId === u.id && (
                       <form
                         onSubmit={(e) => handleResetUserPassword(e, u)}
@@ -1575,65 +1816,107 @@ export default function HomePage() {
 
       {activeTab === "Campaigns & Leads" && (
         <section>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
-            <h3 style={{ margin: 0 }}>Campaigns & Leads</h3>
+          <div
+            style={{
+              display: "flex",
+              gap: 12,
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 14,
+            }}
+          >
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <h3 style={{ margin: 0 }}>Active Campaigns ({activeProjects.length})</h3>
 
-            {profile.role === "super_admin" && tenants.length > 0 && (
+              {profile.role === "super_admin" && tenants.length > 0 && (
+                <label style={{ fontSize: 13 }}>
+                  Tenant:{" "}
+                  <select
+                    value={selectedTenantScope}
+                    onChange={async (e) => {
+                      const nextTenant = e.target.value;
+                      setSelectedTenantScope(nextTenant);
+                      const pRes = await safeJsonFetch(
+                        `/api/projects?tenant_id=${encodeURIComponent(nextTenant)}`,
+                        { headers: { Authorization: `Bearer ${session.access_token}` } }
+                      );
+                      const list = pRes.ok
+                        ? (pRes.data.projects || []).filter((p) => {
+                            const st = String(p.status || "active").toLowerCase();
+                            return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
+                          })
+                        : [];
+                      setProjects(list);
+                      const firstProj = list[0]?.id || "";
+                      setSelectedProjectId(firstProj);
+                      await loadCampaignAndLeadsData(session.access_token, profile, firstProj, nextTenant);
+                    }}
+                  >
+                    {tenants.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        #{t.numeric_id} {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
               <label style={{ fontSize: 13 }}>
-                Tenant:{" "}
+                Select Active Campaign:{" "}
                 <select
-                  value={selectedTenantScope}
+                  value={selectedProjectId}
                   onChange={async (e) => {
-                    const nextTenant = e.target.value;
-                    setSelectedTenantScope(nextTenant);
-                    const pRes = await safeJsonFetch(
-                      `/api/projects?tenant_id=${encodeURIComponent(nextTenant)}`,
-                      { headers: { Authorization: `Bearer ${session.access_token}` } }
+                    const nextProj = e.target.value;
+                    setSelectedProjectId(nextProj);
+                    setDialerFilter((prev) => ({ ...prev, project_id: nextProj }));
+                    await loadCampaignAndLeadsData(
+                      session.access_token,
+                      profile,
+                      nextProj,
+                      profile.role === "super_admin" ? selectedTenantScope : ""
                     );
-                    const list = pRes.ok ? pRes.data.projects || [] : [];
-                    setProjects(list);
-                    const firstProj = list[0]?.id || "";
-                    setSelectedProjectId(firstProj);
-                    await loadCampaignAndLeadsData(session.access_token, profile, firstProj, nextTenant);
                   }}
                 >
-                  {tenants.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      #{t.numeric_id} {t.name}
+                  <option value="">-- Choose Active Campaign --</option>
+                  {activeProjects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} (Active)
                     </option>
                   ))}
                 </select>
               </label>
-            )}
+            </div>
 
-            <label style={{ fontSize: 13 }}>
-              Campaign:{" "}
-              <select
-                value={selectedProjectId}
-                onChange={async (e) => {
-                  const nextProj = e.target.value;
-                  setSelectedProjectId(nextProj);
-                  await loadCampaignAndLeadsData(
-                    session.access_token,
-                    profile,
-                    nextProj,
-                    profile.role === "super_admin" ? selectedTenantScope : ""
-                  );
-                }}
-              >
-                <option value="">All Campaigns ({projects.length})</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {selectedProjectId && (
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setCampaignSubTab("calling_data")}
+                  style={{
+                    fontWeight: campaignSubTab === "calling_data" ? "bold" : "normal",
+                    background: campaignSubTab === "calling_data" ? "#e2e8f0" : "#ffffff",
+                  }}
+                >
+                  Calling Data
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCampaignSubTab("settings")}
+                  style={{
+                    fontWeight: campaignSubTab === "settings" ? "bold" : "normal",
+                    background: campaignSubTab === "settings" ? "#e2e8f0" : "#ffffff",
+                  }}
+                >
+                  Campaign Settings
+                </button>
+              </div>
+            )}
           </div>
 
           {["super_admin", "tenant_admin"].includes(profile.role) && (
-            <div style={{ marginBottom: 20, padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Create Campaign</h4>
+            <div style={{ marginBottom: 18, padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Create Active Campaign</h4>
               <form onSubmit={handleCreateProject} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <input
                   placeholder="Campaign Name"
@@ -1642,7 +1925,7 @@ export default function HomePage() {
                   required
                 />
                 <input
-                  placeholder="Description (optional)"
+                  placeholder="Description / Dates / Target"
                   value={projectForm.description}
                   onChange={(e) => setProjectForm((f) => ({ ...f, description: e.target.value }))}
                 />
@@ -1651,210 +1934,349 @@ export default function HomePage() {
             </div>
           )}
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-              gap: 12,
-              marginBottom: 20,
-            }}
-          >
-            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Call Fields ({callFields.length})</h4>
-              {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
-                <form onSubmit={handleAddCallField} style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                  <input
-                    placeholder="Field label (e.g. City)"
-                    value={fieldForm.label}
-                    onChange={(e) => setFieldForm((f) => ({ ...f, label: e.target.value }))}
-                    required
-                  />
-                  <select
-                    value={fieldForm.field_type}
-                    onChange={(e) => setFieldForm((f) => ({ ...f, field_type: e.target.value }))}
+          {!selectedProjectId ? (
+            <div style={{ padding: 16, border: "1px dashed #94a3b8", borderRadius: 8, color: "#475569" }}>
+              Select an active campaign above to open its <strong>Calling Data</strong> and{" "}
+              <strong>Campaign Settings</strong>.
+            </div>
+          ) : campaignSubTab === "settings" ? (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+                gap: 14,
+              }}
+            >
+              <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                <h4 style={{ marginTop: 0 }}>
+                  Project Dispositions — {activeCampaign?.name} ({dispositions.length})
+                </h4>
+                {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
+                  <form
+                    onSubmit={handleAddDisposition}
+                    style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}
                   >
-                    <option value="text">Text</option>
-                    <option value="number">Number</option>
-                    <option value="date">Date</option>
-                  </select>
-                  <button type="submit">Add</button>
-                </form>
-              )}
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-                {callFields.map((cf) => (
-                  <li key={cf.id}>
-                    {cf.label} <code>({cf.field_key || cf.field_type})</code>
-                  </li>
-                ))}
-                {callFields.length === 0 && <li>No custom fields yet.</li>}
-              </ul>
-            </div>
-
-            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Dispositions ({dispositions.length})</h4>
-              {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
-                <form
-                  onSubmit={handleAddDisposition}
-                  style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}
-                >
-                  <input
-                    placeholder="Disposition (e.g. Interested)"
-                    value={dispositionForm.name}
-                    onChange={(e) => setDispositionForm((f) => ({ ...f, name: e.target.value }))}
-                    required
-                  />
-                  <label style={{ fontSize: 12 }}>
                     <input
-                      type="checkbox"
-                      checked={dispositionForm.requires_followup}
-                      onChange={(e) =>
-                        setDispositionForm((f) => ({ ...f, requires_followup: e.target.checked }))
-                      }
-                    />{" "}
-                    Follow-up
-                  </label>
-                  <button type="submit">Add</button>
-                </form>
-              )}
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-                {dispositions.map((d) => (
-                  <li key={d.id}>
-                    {d.name} {d.requires_followup ? "(Follow-Up)" : ""}
-                  </li>
-                ))}
-                {dispositions.length === 0 && <li>No dispositions configured yet.</li>}
-              </ul>
-            </div>
-          </div>
+                      placeholder="Disposition name (e.g. Interested)"
+                      value={dispositionForm.name}
+                      onChange={(e) => setDispositionForm((f) => ({ ...f, name: e.target.value }))}
+                      required
+                    />
+                    <label style={{ fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={dispositionForm.requires_followup}
+                        onChange={(e) =>
+                          setDispositionForm((f) => ({ ...f, requires_followup: e.target.checked }))
+                        }
+                      />{" "}
+                      Follow-up
+                    </label>
+                    <button type="submit">Add Disposition</button>
+                  </form>
+                )}
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                  {dispositions.map((d) => (
+                    <li key={d.id}>
+                      <strong>{d.name}</strong> {d.requires_followup ? "(Requires Follow-Up)" : ""}
+                    </li>
+                  ))}
+                  {dispositions.length === 0 && <li>No dispositions configured yet for this campaign.</li>}
+                </ul>
+              </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-              gap: 12,
-              marginBottom: 20,
-            }}
-          >
-            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Add Single Lead</h4>
-              <form onSubmit={handleAddSingleLead} style={{ display: "grid", gap: 8 }}>
-                <input
-                  placeholder="Lead Name"
-                  value={leadForm.name}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
-                  required
-                />
-                <input
-                  placeholder="Phone Number"
-                  value={leadForm.phone}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
-                  required
-                />
-                <input
-                  placeholder="Email (optional)"
-                  value={leadForm.email}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
-                />
-                <label style={{ fontSize: 12 }}>
-                  Follow-Up Date/Time (optional):
+              <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                <h4 style={{ marginTop: 0 }}>
+                  Project Call Fields / Parameters — {activeCampaign?.name} ({callFields.length})
+                </h4>
+                {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
+                  <form
+                    onSubmit={handleAddCallField}
+                    style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}
+                  >
+                    <input
+                      placeholder="Parameter label (e.g. City, Loan Type)"
+                      value={fieldForm.label}
+                      onChange={(e) => setFieldForm((f) => ({ ...f, label: e.target.value }))}
+                      required
+                    />
+                    <select
+                      value={fieldForm.field_type}
+                      onChange={(e) => setFieldForm((f) => ({ ...f, field_type: e.target.value }))}
+                    >
+                      <option value="text">Text</option>
+                      <option value="number">Number</option>
+                      <option value="date">Date</option>
+                    </select>
+                    <button type="submit">Add Field</button>
+                  </form>
+                )}
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                  {callFields.map((cf) => (
+                    <li key={cf.id}>
+                      <strong>{cf.label}</strong> <code>({cf.field_key})</code> — {cf.field_type}
+                    </li>
+                  ))}
+                  {callFields.length === 0 && <li>No custom fields created yet for this campaign.</li>}
+                </ul>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+                  gap: 12,
+                  marginBottom: 18,
+                }}
+              >
+                <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                  <h4 style={{ marginTop: 0 }}>Add Lead to {activeCampaign?.name}</h4>
+                  <form onSubmit={handleAddSingleLead} style={{ display: "grid", gap: 8 }}>
+                    <input
+                      placeholder="Customer Name"
+                      value={leadForm.name}
+                      onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
+                      required
+                    />
+                    <input
+                      placeholder="Phone Number"
+                      value={leadForm.phone}
+                      onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
+                      required
+                    />
+                    <input
+                      placeholder="Email (optional)"
+                      value={leadForm.email}
+                      onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
+                    />
+                    {callFields.map((cf) => (
+                      <input
+                        key={cf.id}
+                        type={cf.field_type === "number" ? "number" : cf.field_type === "date" ? "date" : "text"}
+                        placeholder={`${cf.label} (${cf.field_key})`}
+                        value={leadForm.custom_fields[cf.field_key] || ""}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setLeadForm((f) => ({
+                            ...f,
+                            custom_fields: { ...f.custom_fields, [cf.field_key]: val },
+                          }));
+                        }}
+                      />
+                    ))}
+                    <label style={{ fontSize: 12 }}>
+                      Follow-Up Date/Time (optional):
+                      <input
+                        type="datetime-local"
+                        value={leadForm.follow_up_at}
+                        onChange={(e) => setLeadForm((f) => ({ ...f, follow_up_at: e.target.value }))}
+                        style={{ width: "100%", marginTop: 2 }}
+                      />
+                    </label>
+                    <button type="submit">Add Lead</button>
+                  </form>
+                </div>
+
+                <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                  <h4 style={{ marginTop: 0 }}>Bulk CSV Lead Upload</h4>
+                  <form onSubmit={handleUploadCsv} style={{ display: "grid", gap: 8 }}>
+                    <textarea
+                      rows={5}
+                      value={csvText}
+                      onChange={(e) => setCsvText(e.target.value)}
+                      style={{ width: "100%", fontSize: 12 }}
+                    />
+                    <button type="submit">Upload CSV Leads</button>
+                  </form>
+                </div>
+              </div>
+
+              {/* Filter & Bulk Operations Bar */}
+              <div
+                style={{
+                  padding: 12,
+                  border: "1px solid #cbd5e1",
+                  borderRadius: 8,
+                  background: "#f8fafc",
+                  marginBottom: 14,
+                  display: "grid",
+                  gap: 10,
+                }}
+              >
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select
+                    value={leadFilter.status}
+                    onChange={(e) => setLeadFilter((f) => ({ ...f, status: e.target.value }))}
+                  >
+                    <option value="all">All Lead Statuses</option>
+                    <option value="new">new</option>
+                    <option value="contacted">contacted</option>
+                    <option value="follow_up">follow_up</option>
+                    <option value="converted">converted</option>
+                    <option value="closed">closed</option>
+                  </select>
+
+                  <select
+                    value={leadFilter.callKind}
+                    onChange={(e) => setLeadFilter((f) => ({ ...f, callKind: e.target.value }))}
+                  >
+                    <option value="all">All Calls (Fresh + Follow-Up)</option>
+                    <option value="fresh">Only Fresh Call</option>
+                    <option value="followup">Only Follow-Up Call</option>
+                    <option value="fresh_and_followup">Fresh & Follow-Up Call</option>
+                  </select>
+
+                  <select
+                    value={leadFilter.disposition}
+                    onChange={(e) => setLeadFilter((f) => ({ ...f, disposition: e.target.value }))}
+                  >
+                    <option value="all">All Dispositions</option>
+                    <option value="__none__">No Disposition Yet</option>
+                    {dispositions.map((d) => (
+                      <option key={d.id} value={d.name}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={leadFilter.paramKey}
+                    onChange={(e) => setLeadFilter((f) => ({ ...f, paramKey: e.target.value }))}
+                  >
+                    <option value="">Parameter Filter (None)</option>
+                    {paramOptions.map((po) => (
+                      <option key={po.key} value={po.key}>
+                        {po.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    placeholder="Parameter value (e.g. Mumbai)"
+                    value={leadFilter.paramValue}
+                    onChange={(e) => setLeadFilter((f) => ({ ...f, paramValue: e.target.value }))}
+                    style={{ width: 170, padding: 5 }}
+                  />
+
+                  <input
+                    placeholder="Search name, phone, notes..."
+                    value={leadFilter.search}
+                    onChange={(e) => setLeadFilter((f) => ({ ...f, search: e.target.value }))}
+                    style={{ width: 190, padding: 5 }}
+                  />
+                </div>
+
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, fontWeight: "bold" }}>
+                    Bulk Actions on {filteredCallingLeads.length} filtered lead(s):
+                  </span>
                   <input
                     type="datetime-local"
-                    value={leadForm.follow_up_at}
-                    onChange={(e) => setLeadForm((f) => ({ ...f, follow_up_at: e.target.value }))}
-                    style={{ width: "100%", marginTop: 2 }}
+                    value={bulkFollowUpAt}
+                    onChange={(e) => setBulkFollowUpAt(e.target.value)}
                   />
-                </label>
-                <button type="submit">Add Lead</button>
-              </form>
+                  <button
+                    type="button"
+                    onClick={handleBulkSetFollowUp}
+                    disabled={!bulkFollowUpAt || filteredCallingLeads.length === 0}
+                  >
+                    Bulk Set Follow-Up
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBulkDeleteFilteredLeads}
+                    disabled={filteredCallingLeads.length === 0}
+                    style={{ color: "#991b1b" }}
+                  >
+                    Delete Filtered Leads
+                  </button>
+                </div>
+              </div>
+
+              <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    <th>Customer Details</th>
+                    <th>Phone</th>
+                    <th>Project Parameters</th>
+                    <th>Status</th>
+                    <th>Last Disposition</th>
+                    <th>Follow-Up</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCallingLeads.map((l) => {
+                    const cf = getLeadCustomFields(l);
+                    const paramEntries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
+                    return (
+                      <tr key={l.id}>
+                        <td>
+                          <strong>{l.name}</strong>
+                          {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
+                          {l.notes && <div style={{ fontSize: 11, color: "#334155" }}>Note: {l.notes}</div>}
+                        </td>
+                        <td>{l.phone}</td>
+                        <td>
+                          {paramEntries.length > 0 ? (
+                            paramEntries.map(([k, v]) => (
+                              <div key={k} style={{ fontSize: 12 }}>
+                                <code>{k}</code>: <strong>{String(v)}</strong>
+                              </div>
+                            ))
+                          ) : (
+                            <span style={{ color: "#94a3b8" }}>-</span>
+                          )}
+                        </td>
+                        <td>
+                          <select
+                            value={l.status || "new"}
+                            onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
+                          >
+                            <option value="new">new</option>
+                            <option value="contacted">contacted</option>
+                            <option value="follow_up">follow_up</option>
+                            <option value="converted">converted</option>
+                            <option value="closed">closed</option>
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            value={l.disposition || ""}
+                            onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
+                          >
+                            <option value="">-- None --</option>
+                            {dispositions.map((d) => (
+                              <option key={d.id} value={d.name}>
+                                {d.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            type="datetime-local"
+                            value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
+                            onChange={(e) =>
+                              handleUpdateLead(l.id, {
+                                follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
+                              })
+                            }
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredCallingLeads.length === 0 && (
+                    <tr>
+                      <td colSpan="6">No leads match the current filters.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-
-            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Bulk CSV Lead Upload</h4>
-              <form onSubmit={handleUploadCsv} style={{ display: "grid", gap: 8 }}>
-                <textarea
-                  rows={4}
-                  value={csvText}
-                  onChange={(e) => setCsvText(e.target.value)}
-                  style={{ width: "100%", fontSize: 12 }}
-                />
-                <button type="submit">Upload CSV Leads</button>
-              </form>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <h4 style={{ margin: 0 }}>Leads ({filteredLeads.length})</h4>
-            <input
-              placeholder="Search name, phone, status, disposition..."
-              value={leadSearch}
-              onChange={(e) => setLeadSearch(e.target.value)}
-              style={{ width: 260, padding: 6 }}
-            />
-          </div>
-
-          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th>Lead</th>
-                <th>Phone</th>
-                <th>Status</th>
-                <th>Disposition</th>
-                <th>Follow-Up</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredLeads.map((l) => (
-                <tr key={l.id}>
-                  <td>
-                    <strong>{l.name}</strong>
-                    {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
-                  </td>
-                  <td>{l.phone}</td>
-                  <td>
-                    <select
-                      value={l.status || "new"}
-                      onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
-                    >
-                      <option value="new">new</option>
-                      <option value="contacted">contacted</option>
-                      <option value="follow_up">follow_up</option>
-                      <option value="converted">converted</option>
-                      <option value="closed">closed</option>
-                    </select>
-                  </td>
-                  <td>
-                    <select
-                      value={l.disposition || ""}
-                      onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
-                    >
-                      <option value="">-- Select --</option>
-                      {dispositions.map((d) => (
-                        <option key={d.id} value={d.name}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <input
-                      type="datetime-local"
-                      value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
-                      onChange={(e) =>
-                        handleUpdateLead(l.id, {
-                          follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
-                        })
-                      }
-                    />
-                  </td>
-                </tr>
-              ))}
-              {filteredLeads.length === 0 && (
-                <tr>
-                  <td colSpan="5">No leads found for this selection.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+          )}
         </section>
       )}
 
@@ -1897,183 +2319,423 @@ export default function HomePage() {
         <section>
           <h3>SmartCall Dialer Console</h3>
 
-          <div
+          {/* Step A: Calling Filter Bar */}
+          <form
+            onSubmit={handleApplyDialerQueue}
             style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-              gap: 16,
-              marginBottom: 24,
+              padding: 12,
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              background: "#f8fafc",
+              marginBottom: 16,
+              display: "flex",
+              gap: 8,
+              flexWrap: "wrap",
+              alignItems: "center",
             }}
           >
-            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Dial & Log Call</h4>
-              <form onSubmit={handleLogCall} style={{ display: "grid", gap: 8 }}>
-                <label style={{ fontSize: 12 }}>
-                  Pick Lead (optional):
-                  <select
-                    value={dialerState.lead_id}
+            <label style={{ fontSize: 12 }}>
+              Campaign:{" "}
+              <select
+                value={dialerFilter.project_id}
+                onChange={(e) => setDialerFilter((f) => ({ ...f, project_id: e.target.value }))}
+              >
+                <option value="">All Active Campaigns</option>
+                {activeProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={{ fontSize: 12 }}>
+              Call Queue:{" "}
+              <select
+                value={dialerFilter.callKind}
+                onChange={(e) => setDialerFilter((f) => ({ ...f, callKind: e.target.value }))}
+              >
+                <option value="all">Fresh & Follow-Up</option>
+                <option value="fresh">Only Fresh Call</option>
+                <option value="followup">Only Follow-Up Call</option>
+                <option value="fresh_and_followup">Fresh + Follow-Up Queue</option>
+              </select>
+            </label>
+
+            <label style={{ fontSize: 12 }}>
+              Lead Status:{" "}
+              <select
+                value={dialerFilter.status}
+                onChange={(e) => setDialerFilter((f) => ({ ...f, status: e.target.value }))}
+              >
+                <option value="all">All Statuses</option>
+                <option value="new">new</option>
+                <option value="contacted">contacted</option>
+                <option value="follow_up">follow_up</option>
+                <option value="converted">converted</option>
+                <option value="closed">closed</option>
+              </select>
+            </label>
+
+            <label style={{ fontSize: 12 }}>
+              Disposition:{" "}
+              <select
+                value={dialerFilter.disposition}
+                onChange={(e) => setDialerFilter((f) => ({ ...f, disposition: e.target.value }))}
+              >
+                <option value="all">All Dispositions</option>
+                <option value="__none__">No Disposition</option>
+                {dispositions.map((d) => (
+                  <option key={d.id} value={d.name}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <select
+              value={dialerFilter.paramKey}
+              onChange={(e) => setDialerFilter((f) => ({ ...f, paramKey: e.target.value }))}
+            >
+              <option value="">Data Parameter Filter</option>
+              {paramOptions.map((po) => (
+                <option key={po.key} value={po.key}>
+                  {po.label}
+                </option>
+              ))}
+            </select>
+
+            <input
+              placeholder="Filter value (e.g. Mumbai)"
+              value={dialerFilter.paramValue}
+              onChange={(e) => setDialerFilter((f) => ({ ...f, paramValue: e.target.value }))}
+              style={{ width: 150, padding: 5 }}
+            />
+
+            <button type="submit" style={{ fontWeight: "bold" }}>
+              Apply Filter & Load Queue ({dialerQueueLeads.length})
+            </button>
+          </form>
+
+          {/* Step B: Sequential Lead Card (Lead Info First -> Call Options -> Follow-Up & Fields -> Save & Next / Save & Stop / Cancel Call) */}
+          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <h4 style={{ margin: 0 }}>
+                Active Calling Workspace{" "}
+                {queueActive && dialerQueueLeads.length > 0
+                  ? `(Lead ${queueIndex + 1} of ${dialerQueueLeads.length} in Queue)`
+                  : "(Manual / Direct Call)"}
+              </h4>
+              {!queueActive && (
+                <input
+                  placeholder="Or type phone number directly..."
+                  value={dialerForm.phone}
+                  onChange={(e) => setDialerForm((prev) => ({ ...prev, phone: e.target.value }))}
+                  style={{ width: 220, padding: 5 }}
+                />
+              )}
+            </div>
+
+            {/* 1. Lead Information First */}
+            <div
+              style={{
+                padding: 10,
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: 6,
+                marginBottom: 12,
+                fontSize: 13,
+              }}
+            >
+              <div>
+                <strong>Lead:</strong> {currentQueueLead?.name || "Direct Number"}{" "}
+                <span style={{ marginLeft: 12 }}>
+                  <strong>Phone:</strong> {dialerForm.phone || "-"}
+                </span>{" "}
+                <span style={{ marginLeft: 12 }}>
+                  <strong>Status:</strong> <code>{currentQueueLead?.status || "new"}</code>
+                </span>{" "}
+                <span style={{ marginLeft: 12 }}>
+                  <strong>Last Disposition:</strong> {currentQueueLead?.disposition || "-"}
+                </span>
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12, color: "#475569" }}>
+                <strong>Follow-Up:</strong>{" "}
+                {currentQueueLead?.follow_up_at
+                  ? new Date(currentQueueLead.follow_up_at).toLocaleString()
+                  : "None"}{" "}
+                |{" "}
+                <strong>Parameters:</strong>{" "}
+                {Object.entries(dialerForm.custom_fields || {})
+                  .filter(([, v]) => v !== "" && v != null)
+                  .map(([k, v]) => `${k}: ${v}`)
+                  .join(", ") || "None"}
+              </div>
+            </div>
+
+            {/* 2. Call Options */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+              <button type="button" onClick={handleStartCall} disabled={Boolean(dialerForm.callStartedAt)}>
+                Start Call
+              </button>
+              <button type="button" onClick={handleEndCall} disabled={!dialerForm.callStartedAt}>
+                End Call
+              </button>
+              <button type="button" onClick={handleCancelCall} style={{ color: "#991b1b" }}>
+                Cancel Call
+              </button>
+
+              <label style={{ fontSize: 12, marginLeft: 8 }}>
+                Call Status:{" "}
+                <select
+                  value={dialerForm.status}
+                  onChange={(e) => setDialerForm((prev) => ({ ...prev, status: e.target.value }))}
+                >
+                  <option value="connected">connected</option>
+                  <option value="completed">completed</option>
+                  <option value="no_answer">no_answer</option>
+                  <option value="busy">busy</option>
+                </select>
+              </label>
+
+              <label style={{ fontSize: 12 }}>
+                Duration (sec):{" "}
+                <input
+                  type="number"
+                  min="0"
+                  value={dialerForm.duration_seconds}
+                  onChange={(e) => setDialerForm((prev) => ({ ...prev, duration_seconds: e.target.value }))}
+                  style={{ width: 70 }}
+                />
+              </label>
+
+              {dialerForm.callStartedAt && (
+                <span style={{ fontSize: 12, color: "#166534", fontWeight: "bold" }}>
+                  Call Active...
+                </span>
+              )}
+            </div>
+
+            {/* 3. Follow-Up, Disposition, Project Fields & Notes */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+                gap: 8,
+                marginBottom: 14,
+              }}
+            >
+              <label style={{ fontSize: 12 }}>
+                Disposition:
+                <select
+                  value={dialerForm.disposition}
+                  onChange={(e) => setDialerForm((prev) => ({ ...prev, disposition: e.target.value }))}
+                  style={{ width: "100%", marginTop: 2 }}
+                >
+                  <option value="">-- Select Disposition --</option>
+                  {dispositions.map((d) => (
+                    <option key={d.id} value={d.name}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label style={{ fontSize: 12 }}>
+                Follow-Up Date/Time:
+                <input
+                  type="datetime-local"
+                  value={dialerForm.follow_up_at}
+                  onChange={(e) => setDialerForm((prev) => ({ ...prev, follow_up_at: e.target.value }))}
+                  style={{ width: "100%", marginTop: 2 }}
+                />
+              </label>
+
+              {callFields.map((cf) => (
+                <label key={cf.id} style={{ fontSize: 12 }}>
+                  {cf.label}:
+                  <input
+                    type={cf.field_type === "number" ? "number" : cf.field_type === "date" ? "date" : "text"}
+                    value={dialerForm.custom_fields[cf.field_key] || ""}
                     onChange={(e) => {
-                      const pickedId = e.target.value;
-                      const found = leads.find((item) => item.id === pickedId);
-                      setDialerState((prev) => ({
+                      const val = e.target.value;
+                      setDialerForm((prev) => ({
                         ...prev,
-                        lead_id: pickedId,
-                        phone: found?.phone || prev.phone,
+                        custom_fields: { ...prev.custom_fields, [cf.field_key]: val },
                       }));
                     }}
                     style={{ width: "100%", marginTop: 2 }}
-                  >
-                    <option value="">-- Manual Number --</option>
-                    {leads.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.name} ({l.phone})
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label style={{ fontSize: 12 }}>
-                  Phone Number:
-                  <input
-                    placeholder="e.g. 9876543210"
-                    value={dialerState.phone}
-                    onChange={(e) => setDialerState((prev) => ({ ...prev, phone: e.target.value }))}
-                    required
-                    style={{ width: "100%", marginTop: 2 }}
                   />
                 </label>
+              ))}
 
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  <button type="button" onClick={handleStartSmartCall} disabled={Boolean(dialerState.activeCallStartedAt)}>
-                    Start Call
-                  </button>
-                  <button type="button" onClick={handleEndSmartCall} disabled={!dialerState.activeCallStartedAt}>
-                    End Call
-                  </button>
-                  {dialerState.activeCallStartedAt && (
-                    <span style={{ fontSize: 12, color: "#166534", fontWeight: "bold", alignSelf: "center" }}>
-                      Call in progress...
-                    </span>
-                  )}
-                </div>
-
-                <div style={{ display: "flex", gap: 8 }}>
-                  <label style={{ fontSize: 12, flex: 1 }}>
-                    Call Status:
-                    <select
-                      value={dialerState.status}
-                      onChange={(e) => setDialerState((prev) => ({ ...prev, status: e.target.value }))}
-                      style={{ width: "100%", marginTop: 2 }}
-                    >
-                      <option value="connected">connected</option>
-                      <option value="completed">completed</option>
-                      <option value="no_answer">no_answer</option>
-                      <option value="busy">busy</option>
-                    </select>
-                  </label>
-                  <label style={{ fontSize: 12, flex: 1 }}>
-                    Duration (sec):
-                    <input
-                      type="number"
-                      min="0"
-                      value={dialerState.duration_seconds}
-                      onChange={(e) =>
-                        setDialerState((prev) => ({ ...prev, duration_seconds: e.target.value }))
-                      }
-                      style={{ width: "100%", marginTop: 2 }}
-                    />
-                  </label>
-                </div>
-
-                <label style={{ fontSize: 12 }}>
-                  Disposition:
-                  <select
-                    value={dialerState.disposition}
-                    onChange={(e) => setDialerState((prev) => ({ ...prev, disposition: e.target.value }))}
-                    style={{ width: "100%", marginTop: 2 }}
-                  >
-                    <option value="">-- Select Disposition --</option>
-                    {dispositions.map((d) => (
-                      <option key={d.id} value={d.name}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                {callFields.map((cf) => (
-                  <label key={cf.id} style={{ fontSize: 12 }}>
-                    {cf.label}:
-                    <input
-                      type={cf.field_type === "number" ? "number" : cf.field_type === "date" ? "date" : "text"}
-                      value={dialerState.custom_fields[cf.field_key] || ""}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setDialerState((prev) => ({
-                          ...prev,
-                          custom_fields: {
-                            ...prev.custom_fields,
-                            [cf.field_key]: val,
-                          },
-                        }));
-                      }}
-                      style={{ width: "100%", marginTop: 2 }}
-                    />
-                  </label>
-                ))}
-
-                <label style={{ fontSize: 12 }}>
-                  Schedule Follow-Up (optional):
-                  <input
-                    type="datetime-local"
-                    value={dialerState.follow_up_at}
-                    onChange={(e) => setDialerState((prev) => ({ ...prev, follow_up_at: e.target.value }))}
-                    style={{ width: "100%", marginTop: 2 }}
-                  />
-                </label>
-
-                <label style={{ fontSize: 12 }}>
-                  Call Notes:
-                  <textarea
-                    rows={2}
-                    value={dialerState.notes}
-                    onChange={(e) => setDialerState((prev) => ({ ...prev, notes: e.target.value }))}
-                    style={{ width: "100%", marginTop: 2 }}
-                  />
-                </label>
-
-                <button type="submit">Log Call</button>
-              </form>
+              <label style={{ fontSize: 12 }}>
+                Call Notes:
+                <input
+                  placeholder="Summary or remarks"
+                  value={dialerForm.notes}
+                  onChange={(e) => setDialerForm((prev) => ({ ...prev, notes: e.target.value }))}
+                  style={{ width: "100%", marginTop: 2 }}
+                />
+              </label>
             </div>
 
-            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Recent Call Logs ({callLogs.length})</h4>
-              <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
+            {/* 4. Save & Next / Save & Stop */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => persistDialerCall({ moveToNext: true })}
+                style={{ fontWeight: "bold", padding: "6px 12px" }}
+              >
+                Save & Next
+              </button>
+              <button
+                type="button"
+                onClick={() => persistDialerCall({ moveToNext: false })}
+                style={{ padding: "6px 12px" }}
+              >
+                Save & Stop
+              </button>
+            </div>
+          </div>
+
+          {/* Step C: Paginated Call Logs (10 per page) with Expandable Row Details & Call Actions */}
+          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 8,
+                marginBottom: 10,
+              }}
+            >
+              <h4 style={{ margin: 0 }}>
+                Call Logs ({callLogs.length} total — Page {callLogPage} of {totalCallPages}, 10 per page)
+              </h4>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button
+                  type="button"
+                  disabled={callLogPage <= 1}
+                  onClick={() => setCallLogPage((p) => Math.max(1, p - 1))}
+                >
+                  Prev 10
+                </button>
+                <span style={{ fontSize: 12 }}>
+                  Page {callLogPage} / {totalCallPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={callLogPage >= totalCallPages}
+                  onClick={() => setCallLogPage((p) => Math.min(totalCallPages, p + 1))}
+                >
+                  Next 10
+                </button>
+              </div>
+            </div>
+
+            <table border="1" cellPadding="7" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th>Expand</th>
+                  <th>Time</th>
+                  <th>Phone</th>
+                  <th>Status</th>
+                  <th>Disposition</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginatedCallLogs.map((c) => {
+                  const isOpen = Boolean(expandedCallIds[c.id]);
+                  const cfEntries =
+                    c.custom_fields && typeof c.custom_fields === "object"
+                      ? Object.entries(c.custom_fields)
+                      : [];
+                  return (
+                    <Fragment key={c.id}>
+                      <tr>
+                        <td>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedCallIds((prev) => ({ ...prev, [c.id]: !prev[c.id] }))
+                            }
+                          >
+                            {isOpen ? "Collapse" : "Expand"}
+                          </button>
+                        </td>
+                        <td>{c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</td>
+                        <td>{c.phone}</td>
+                        <td>{c.status}</td>
+                        <td>{c.disposition || "-"}</td>
+                        <td>{c.duration_seconds || 0}s</td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan="6" style={{ background: "#f8fafc" }}>
+                            <div style={{ marginBottom: 6 }}>
+                              <strong>Provider:</strong> {c.provider || "smartcall"} |{" "}
+                              <strong>Call ID:</strong> <code>{c.external_call_id || c.id}</code> |{" "}
+                              <strong>Notes:</strong> {c.notes || "-"}
+                            </div>
+                            <div style={{ marginBottom: 8 }}>
+                              <strong>Custom Fields:</strong>{" "}
+                              {cfEntries.length > 0
+                                ? cfEntries.map(([k, v]) => `${k}: ${String(v)}`).join(" | ")
+                                : "None"}
+                            </div>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setQueueActive(false);
+                                  setDialerForm((prev) => ({
+                                    ...prev,
+                                    lead_id: c.lead_id || "",
+                                    phone: c.phone || "",
+                                    status: "connected",
+                                    disposition: c.disposition || "",
+                                    notes: c.notes || "",
+                                    custom_fields:
+                                      c.custom_fields && typeof c.custom_fields === "object"
+                                        ? { ...c.custom_fields }
+                                        : {},
+                                    callStartedAt: new Date().toISOString(),
+                                  }));
+                                  setStatusMessage(`Started callback to ${c.phone}.`);
+                                }}
+                              >
+                                Call Back Now
+                              </button>
+                              {c.lead_id && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateLead(c.lead_id, {
+                                      status: "follow_up",
+                                      follow_up_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+                                    })
+                                  }
+                                >
+                                  Schedule +24h Follow-Up
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+                {paginatedCallLogs.length === 0 && (
                   <tr>
-                    <th>Phone</th>
-                    <th>Status</th>
-                    <th>Disposition</th>
-                    <th>Duration</th>
+                    <td colSpan="6">No call logs found.</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {callLogs.slice(0, 15).map((c) => (
-                    <tr key={c.id}>
-                      <td>{c.phone}</td>
-                      <td>{c.status}</td>
-                      <td>{c.disposition || "-"}</td>
-                      <td>{c.duration_seconds || 0}s</td>
-                    </tr>
-                  ))}
-                  {callLogs.length === 0 && (
-                    <tr>
-                      <td colSpan="4">No calls logged yet.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                )}
+              </tbody>
+            </table>
           </div>
         </section>
       )}
