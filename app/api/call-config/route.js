@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
 
+function toFieldKey(raw) {
+  const base = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return base || `field_${Date.now()}`;
+}
+
 export async function GET(req) {
   try {
     const supabase = getServiceSupabase();
@@ -57,7 +66,7 @@ export async function POST(req) {
     }
 
     const body = await req.json();
-    const kind = body.kind; // "field" | "disposition"
+    const kind = body.kind;
     const tenantId =
       caller.profile.role === "super_admin" && body.tenant_id
         ? body.tenant_id
@@ -75,11 +84,14 @@ export async function POST(req) {
         return NextResponse.json({ error: "Field label is required" }, { status: 400 });
       }
 
+      const fieldKey = toFieldKey(body.field_key || label);
+
       const { data: created, error } = await supabase
         .from("call_fields")
         .insert({
           tenant_id: tenantId,
           project_id: projectId,
+          field_key: fieldKey,
           label,
           field_type: fieldType,
           is_required: Boolean(body.is_required),
@@ -95,6 +107,22 @@ export async function POST(req) {
       const name = String(body.name || "").trim();
       if (!name) {
         return NextResponse.json({ error: "Disposition name is required" }, { status: 400 });
+      }
+
+      let dupQuery = supabase
+        .from("dispositions")
+        .select("id, name")
+        .eq("tenant_id", tenantId)
+        .ilike("name", name);
+
+      dupQuery = projectId ? dupQuery.eq("project_id", projectId) : dupQuery.is("project_id", null);
+
+      const { data: existingDisp } = await dupQuery.maybeSingle();
+      if (existingDisp) {
+        return NextResponse.json(
+          { error: `Disposition "${existingDisp.name}" already exists for this selection.` },
+          { status: 409 }
+        );
       }
 
       const { data: created, error } = await supabase
