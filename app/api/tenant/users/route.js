@@ -1,12 +1,38 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
-import { computeActiveSeats } from "@/app/api/admin/tenants/route";
 
-function isPeriodActiveAt(period, nowMs = Date.now()) {
+export function getLicensePeriodState(period, nowMs = Date.now()) {
   const startMs = period.starts_at ? new Date(period.starts_at).getTime() : -Infinity;
   const endMs = period.ends_at ? new Date(period.ends_at).getTime() : Infinity;
-  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return false;
-  return startMs <= nowMs && nowMs < endMs;
+
+  if (!Number.isNaN(endMs) && endMs <= nowMs) {
+    return { state: "expired", label: "Expired", isActiveNow: false };
+  }
+  if (!Number.isNaN(startMs) && startMs > nowMs) {
+    return { state: "upcoming", label: "Upcoming", isActiveNow: false };
+  }
+  return { state: "active", label: "Active Now", isActiveNow: true };
+}
+
+export async function computeActiveSeats(supabase, tenantId) {
+  const { data: periods, error } = await supabase
+    .from("license_periods")
+    .select("id, seat_count, starts_at, ends_at")
+    .eq("tenant_id", tenantId);
+
+  if (error || !periods || periods.length === 0) {
+    const { data: t } = await supabase
+      .from("tenants")
+      .select("max_licenses")
+      .eq("id", tenantId)
+      .maybeSingle();
+    return Number(t?.max_licenses ?? 0);
+  }
+
+  const nowMs = Date.now();
+  return periods
+    .filter((p) => getLicensePeriodState(p, nowMs).isActiveNow)
+    .reduce((sum, p) => sum + Math.max(0, Number(p.seat_count || 0)), 0);
 }
 
 export async function GET(req) {
@@ -16,49 +42,75 @@ export async function GET(req) {
     if (caller.error) {
       return NextResponse.json({ error: caller.error }, { status: caller.status });
     }
-    if (!caller.profile.tenant_id) {
-      return NextResponse.json({ error: "No tenant assigned to caller" }, { status: 400 });
+    if (!["super_admin", "platform_ops"].includes(caller.profile.role)) {
+      return NextResponse.json({ error: "Not authorized to view tenants" }, { status: 403 });
     }
 
-    const tenantId = caller.profile.tenant_id;
-    const [{ data: tenant }, { data: users, error: uErr }, { data: periods, error: lpErr }] =
+    const [{ data: tenants, error: tErr }, { data: profiles, error: pErr }, { data: periods, error: lpErr }] =
       await Promise.all([
-        supabase.from("tenants").select("*").eq("id", tenantId).single(),
-        supabase
-          .from("profiles")
-          .select("id, full_name, email, role, is_active, created_at")
-          .eq("tenant_id", tenantId)
-          .order("created_at", { ascending: true }),
+        supabase.from("tenants").select("*").order("created_at", { ascending: true }),
+        supabase.from("profiles").select("id, tenant_id, full_name, email, role, is_active"),
         supabase
           .from("license_periods")
-          .select("id, tenant_id, seat_count, starts_at, ends_at, reason, created_at")
-          .eq("tenant_id", tenantId)
+          .select("id, tenant_id, seat_count, starts_at, ends_at, reason, changed_by, created_at")
           .order("starts_at", { ascending: false }),
       ]);
 
-    if (uErr) return NextResponse.json({ error: uErr.message }, { status: 400 });
+    if (tErr) return NextResponse.json({ error: tErr.message }, { status: 400 });
+    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 400 });
 
-    const activeSeats = await computeActiveSeats(supabase, tenantId);
-    const list = users || [];
-    const usedLicenses = list.filter((u) => u.is_active).length;
     const nowMs = Date.now();
+    const profileMap = new Map((profiles || []).map((pr) => [pr.id, pr]));
 
-    const licenseHistory = lpErr
-      ? []
-      : (periods || []).map((p) => ({
-          ...p,
-          is_active_now: isPeriodActiveAt(p, nowMs),
-        }));
+    const enriched = (tenants || []).map((t, index) => {
+      const numericId = t.tenant_no ?? t.numeric_id ?? index + 1;
+      const members = (profiles || []).filter((p) => p.tenant_id === t.id);
+      const activeUsersCount = members.filter((p) => p.is_active).length;
 
-    return NextResponse.json({
-      tenant: { ...tenant, max_licenses: activeSeats },
-      active_seats: activeSeats,
-      used_licenses: usedLicenses,
-      remaining_licenses: Math.max(0, activeSeats - usedLicenses),
-      over_capacity: Math.max(0, usedLicenses - activeSeats),
-      license_periods: licenseHistory,
-      users: list,
+      const history = lpErr
+        ? []
+        : (periods || [])
+            .filter((lp) => lp.tenant_id === t.id)
+            .map((lp) => {
+              const actor = profileMap.get(lp.changed_by);
+              const statusInfo = getLicensePeriodState(lp, nowMs);
+              return {
+                ...lp,
+                period_state: statusInfo.state,
+                period_label: statusInfo.label,
+                is_active_now: statusInfo.isActiveNow,
+                changed_by_name: actor?.full_name || null,
+                changed_by_email: actor?.email || null,
+              };
+            });
+
+      const activeSeats =
+        !lpErr && history.length > 0
+          ? history
+              .filter((h) => h.is_active_now)
+              .reduce((sum, h) => sum + Math.max(0, Number(h.seat_count || 0)), 0)
+          : Number(t.max_licenses || 0);
+
+      const licenseExpired = history.length > 0 && activeSeats <= 0;
+      const effectiveState =
+        t.status === "disabled" || licenseExpired ? "disabled" : t.status || "active";
+
+      return {
+        ...t,
+        numeric_id: numericId,
+        max_licenses: activeSeats,
+        active_seats: activeSeats,
+        used_licenses: activeUsersCount,
+        remaining_licenses: Math.max(0, activeSeats - activeUsersCount),
+        over_capacity: Math.max(0, activeUsersCount - activeSeats),
+        license_expired: licenseExpired,
+        effective_state: effectiveState,
+        users: members,
+        license_periods: history,
+      };
     });
+
+    return NextResponse.json({ tenants: enriched.reverse() });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -71,92 +123,108 @@ export async function POST(req) {
     if (caller.error) {
       return NextResponse.json({ error: caller.error }, { status: caller.status });
     }
-    if (caller.profile.role !== "tenant_admin" || !caller.profile.tenant_id) {
-      return NextResponse.json({ error: "Only tenant_admin can add users" }, { status: 403 });
+    if (caller.profile.role !== "super_admin") {
+      return NextResponse.json({ error: "Only super_admin can create tenants" }, { status: 403 });
     }
 
     const body = await req.json();
-    const fullName = String(body.full_name || "").trim();
-    const email = String(body.email || "").trim().toLowerCase();
-    const password = String(body.password || "");
-    const role = body.role || "agent";
+    const {
+      tenant_name,
+      max_licenses = 5,
+      admin_name,
+      admin_email,
+      admin_password,
+      telephony_config = {},
+      license_starts_at = null,
+      license_ends_at = null,
+      reason = "Initial seat block",
+    } = body;
 
-    if (!fullName || !email || !password) {
+    if (!tenant_name || !admin_name || !admin_email || !admin_password) {
       return NextResponse.json(
-        { error: "full_name, email, and password are required" },
+        { error: "tenant_name, admin_name, admin_email, and admin_password are required" },
         { status: 400 }
       );
     }
-    if (password.length < 6) {
-      return NextResponse.json(
-        { error: "Password must be at least 6 characters" },
-        { status: 400 }
-      );
-    }
-    if (!["supervisor", "team_leader", "agent"].includes(role)) {
-      return NextResponse.json({ error: "Invalid user role" }, { status: 400 });
-    }
 
-    const tenantId = caller.profile.tenant_id;
-    const activeSeats = await computeActiveSeats(supabase, tenantId);
+    const cleanEmail = admin_email.trim().toLowerCase();
+    const seats = Math.max(1, Number(max_licenses) || 5);
 
-    const { data: existingTenantUsers } = await supabase
-      .from("profiles")
-      .select("id, is_active")
-      .eq("tenant_id", tenantId);
-
-    const activeUsersCount = (existingTenantUsers || []).filter((u) => u.is_active).length;
-    if (activeUsersCount >= activeSeats) {
-      return NextResponse.json(
-        {
-          error: `Seat limit reached (${activeUsersCount}/${activeSeats} active seats). Disable or remove an active user, or ask Super Admin to add a license block.`,
-        },
-        { status: 409 }
-      );
-    }
-
-    const { data: dupEmail } = await supabase
+    const { data: existingProfile } = await supabase
       .from("profiles")
       .select("id")
-      .ilike("email", email)
+      .ilike("email", cleanEmail)
       .maybeSingle();
 
-    if (dupEmail) {
+    if (existingProfile) {
       return NextResponse.json(
         { error: "Email already exists. Please use a unique email ID." },
         { status: 409 }
       );
     }
 
+    const { data: tenant, error: tenantErr } = await supabase
+      .from("tenants")
+      .insert({
+        name: tenant_name.trim(),
+        max_licenses: seats,
+        telephony_config,
+        status: "active",
+      })
+      .select()
+      .single();
+
+    if (tenantErr) {
+      return NextResponse.json({ error: tenantErr.message }, { status: 400 });
+    }
+
+    const startsAtIso = license_starts_at
+      ? new Date(license_starts_at).toISOString()
+      : new Date().toISOString();
+    const endsAtIso = license_ends_at ? new Date(license_ends_at).toISOString() : null;
+
+    await supabase.from("license_periods").insert({
+      tenant_id: tenant.id,
+      seat_count: seats,
+      starts_at: startsAtIso,
+      ends_at: endsAtIso,
+      reason: String(reason || "Initial seat block").trim(),
+      changed_by: caller.profile.id,
+    });
+
     const { data: authUser, error: authErr } = await supabase.auth.admin.createUser({
-      email,
-      password,
+      email: cleanEmail,
+      password: admin_password,
       email_confirm: true,
     });
 
     if (authErr) {
+      await supabase.from("license_periods").delete().eq("tenant_id", tenant.id);
+      await supabase.from("tenants").delete().eq("id", tenant.id);
       return NextResponse.json({ error: authErr.message }, { status: 400 });
     }
 
-    const { data: created, error: insErr } = await supabase
+    const { data: profile, error: profErr } = await supabase
       .from("profiles")
       .insert({
         id: authUser.user.id,
-        tenant_id: tenantId,
-        full_name: fullName,
-        email,
-        role,
+        tenant_id: tenant.id,
+        full_name: admin_name.trim(),
+        email: cleanEmail,
+        role: "tenant_admin",
         is_active: true,
       })
       .select()
       .single();
 
-    if (insErr) {
+    if (profErr) {
       await supabase.auth.admin.deleteUser(authUser.user.id).catch(() => {});
-      return NextResponse.json({ error: insErr.message }, { status: 400 });
+      await supabase.from("license_periods").delete().eq("tenant_id", tenant.id);
+      await supabase.from("tenants").delete().eq("id", tenant.id);
+      return NextResponse.json({ error: profErr.message }, { status: 400 });
     }
 
-    return NextResponse.json({ user: created }, { status: 201 });
+    return NextResponse.json({ tenant, admin: profile }, { status: 201 });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -169,85 +237,116 @@ export async function PATCH(req) {
     if (caller.error) {
       return NextResponse.json({ error: caller.error }, { status: caller.status });
     }
-    if (caller.profile.role !== "tenant_admin" || !caller.profile.tenant_id) {
-      return NextResponse.json({ error: "Only tenant_admin can update users" }, { status: 403 });
+    if (!["super_admin", "platform_ops"].includes(caller.profile.role)) {
+      return NextResponse.json({ error: "Not authorized to update tenant licenses" }, { status: 403 });
     }
 
     const body = await req.json();
-    const userId = body.user_id;
-    if (!userId) {
-      return NextResponse.json({ error: "user_id is required" }, { status: 400 });
+    const action = body.action || "add_block";
+    const tenantId = body.tenant_id;
+
+    if (!tenantId) {
+      return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
     }
 
-    const tenantId = caller.profile.tenant_id;
-    const { data: target } = await supabase
-      .from("profiles")
-      .select("id, tenant_id, email, is_active, role")
-      .eq("id", userId)
-      .eq("tenant_id", tenantId)
-      .maybeSingle();
+    if (action === "set_status") {
+      const nextStatus = body.status === "disabled" ? "disabled" : "active";
+      const { data: updatedTenant, error: stErr } = await supabase
+        .from("tenants")
+        .update({ status: nextStatus })
+        .eq("id", tenantId)
+        .select()
+        .single();
 
-    if (!target) {
-      return NextResponse.json({ error: "User not found in your tenant" }, { status: 404 });
+      if (stErr) return NextResponse.json({ error: stErr.message }, { status: 400 });
+      return NextResponse.json({ ok: true, tenant: updatedTenant, changed_by: caller.profile.id });
     }
 
-    // Reset password directly from UI
-    if (body.action === "reset_password" || typeof body.password === "string") {
-      const nextPassword = String(body.password || "");
-      if (nextPassword.length < 6) {
-        return NextResponse.json(
-          { error: "New password must be at least 6 characters" },
-          { status: 400 }
-        );
+    if (action === "end_block") {
+      if (!body.period_id) {
+        return NextResponse.json({ error: "period_id is required to end a block" }, { status: 400 });
       }
+      const endIso = body.ends_at ? new Date(body.ends_at).toISOString() : new Date().toISOString();
+      const { error: updErr } = await supabase
+        .from("license_periods")
+        .update({ ends_at: endIso })
+        .eq("id", body.period_id)
+        .eq("tenant_id", tenantId);
 
-      const { error: pwErr } = await supabase.auth.admin.updateUserById(userId, {
-        password: nextPassword,
+      if (updErr) return NextResponse.json({ error: updErr.message }, { status: 400 });
+
+      const activeSeats = await computeActiveSeats(supabase, tenantId);
+      const nextStatus = activeSeats <= 0 ? "disabled" : "active";
+
+      await supabase
+        .from("tenants")
+        .update({ max_licenses: activeSeats, status: nextStatus })
+        .eq("id", tenantId);
+
+      return NextResponse.json({
+        ok: true,
+        active_seats: activeSeats,
+        status: nextStatus,
+        changed_by: caller.profile.id,
       });
-
-      if (pwErr) {
-        return NextResponse.json({ error: pwErr.message }, { status: 400 });
-      }
-
-      return NextResponse.json({ ok: true, password_reset: true, user_id: userId });
     }
 
-    if (typeof body.is_active !== "boolean") {
+    const seatCount = Number(body.seat_count ?? body.max_licenses);
+    if (Number.isNaN(seatCount) || seatCount <= 0) {
       return NextResponse.json(
-        { error: "Provide boolean is_active or a new password" },
+        { error: "seat_count must be a positive number (e.g. 3 for 1 month, 2 for 6 months)" },
         { status: 400 }
       );
     }
 
-    if (body.is_active && !target.is_active) {
-      const activeSeats = await computeActiveSeats(supabase, tenantId);
-      const { data: members } = await supabase
-        .from("profiles")
-        .select("id, is_active")
-        .eq("tenant_id", tenantId);
-      const activeUsersCount = (members || []).filter((m) => m.is_active).length;
-
-      if (activeUsersCount >= activeSeats) {
-        return NextResponse.json(
-          {
-            error: `Cannot activate user: all ${activeSeats} active seat(s) are currently in use. Disable another user first or request more seats.`,
-          },
-          { status: 409 }
-        );
-      }
+    const startsAt = body.starts_at ? new Date(body.starts_at).toISOString() : new Date().toISOString();
+    let endsAt = null;
+    if (body.ends_at) {
+      endsAt = new Date(body.ends_at).toISOString();
+    } else if (body.duration_months && Number(body.duration_months) > 0) {
+      const d = new Date(startsAt);
+      d.setMonth(d.getMonth() + Number(body.duration_months));
+      endsAt = d.toISOString();
     }
 
-    const { data: updated, error: updErr } = await supabase
-      .from("profiles")
-      .update({ is_active: body.is_active })
-      .eq("id", userId)
-      .eq("tenant_id", tenantId)
+    const reason = String(body.reason || "").trim() || "Seat block added";
+
+    const { data: period, error: lpErr } = await supabase
+      .from("license_periods")
+      .insert({
+        tenant_id: tenantId,
+        seat_count: seatCount,
+        starts_at: startsAt,
+        ends_at: endsAt,
+        reason,
+        changed_by: caller.profile.id,
+      })
       .select()
       .single();
 
-    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 400 });
+    if (lpErr) return NextResponse.json({ error: lpErr.message }, { status: 400 });
 
-    return NextResponse.json({ user: updated });
+    const activeSeats = await computeActiveSeats(supabase, tenantId);
+    const nextStatus = activeSeats > 0 ? "active" : "disabled";
+
+    const { data: updatedTenant, error: tErr } = await supabase
+      .from("tenants")
+      .update({
+        max_licenses: activeSeats,
+        status: body.status || nextStatus,
+      })
+      .eq("id", tenantId)
+      .select()
+      .single();
+
+    if (tErr) return NextResponse.json({ error: tErr.message }, { status: 400 });
+
+    return NextResponse.json({
+      tenant: updatedTenant,
+      active_seats: activeSeats,
+      license_period: period,
+      changed_by: caller.profile.id,
+    });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -260,35 +359,29 @@ export async function DELETE(req) {
     if (caller.error) {
       return NextResponse.json({ error: caller.error }, { status: caller.status });
     }
-    if (caller.profile.role !== "tenant_admin" || !caller.profile.tenant_id) {
-      return NextResponse.json({ error: "Only tenant_admin can delete users" }, { status: 403 });
+    if (caller.profile.role !== "super_admin") {
+      return NextResponse.json({ error: "Only super_admin can delete tenants" }, { status: 403 });
     }
 
     const body = await req.json().catch(() => ({}));
-    const userId = body.user_id || new URL(req.url).searchParams.get("user_id");
-    if (!userId) {
-      return NextResponse.json({ error: "user_id is required" }, { status: 400 });
-    }
-    if (userId === caller.profile.id) {
-      return NextResponse.json({ error: "You cannot delete your own admin account" }, { status: 400 });
+    const tenantId = body.tenant_id || new URL(req.url).searchParams.get("tenant_id");
+    if (!tenantId) {
+      return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
     }
 
-    const tenantId = caller.profile.tenant_id;
-    const { data: target } = await supabase
+    const { data: members } = await supabase
       .from("profiles")
-      .select("id, tenant_id")
-      .eq("id", userId)
-      .eq("tenant_id", tenantId)
-      .maybeSingle();
+      .select("id")
+      .eq("tenant_id", tenantId);
 
-    if (!target) {
-      return NextResponse.json({ error: "User not found in your tenant" }, { status: 404 });
+    for (const m of members || []) {
+      await supabase.auth.admin.deleteUser(m.id).catch(() => {});
     }
 
-    await supabase.from("profiles").delete().eq("id", userId).eq("tenant_id", tenantId);
-    await supabase.auth.admin.deleteUser(userId).catch(() => {});
+    const { error: delErr } = await supabase.from("tenants").delete().eq("id", tenantId);
+    if (delErr) return NextResponse.json({ error: delErr.message }, { status: 400 });
 
-    return NextResponse.json({ ok: true, deleted_user_id: userId });
+    return NextResponse.json({ ok: true, deleted_tenant_id: tenantId });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
