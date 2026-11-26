@@ -78,7 +78,12 @@ export default function FollowUpsSection({
 
   async function handleSaveReschedule(lead, overrideIso = null) {
     if (!session?.access_token) return;
-    const rawVal = overrideIso ? formatLocalInput(overrideIso) : (draftTimes[lead.id] ?? formatLocalInput(lead.follow_up_at));
+    const rawVal = overrideIso
+      ? formatLocalInput(overrideIso)
+      : draftTimes[lead.id] !== undefined
+      ? draftTimes[lead.id]
+      : formatLocalInput(lead.follow_up_at);
+
     if (!rawVal) {
       onNotify("Choose a valid date and time before rescheduling.");
       return;
@@ -132,7 +137,6 @@ export default function FollowUpsSection({
         <h3 style={{ margin: 0 }}>Scheduled Follow-Ups ({scheduledFollowUps.length})</h3>
       </div>
 
-      {/* Filters */}
       <div
         style={{
           padding: 10,
@@ -222,7 +226,13 @@ export default function FollowUpsSection({
                 <td>{projectNameById[l.project_id] || "-"}</td>
                 <td>{l.disposition || "-"}</td>
                 <td>
-                  <div style={{ fontSize: 11, marginBottom: 4, color: isOverdue ? "#b91c1c" : "#166534" }}>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      marginBottom: 4,
+                      color: isOverdue ? "#b91c1c" : "#166534",
+                    }}
+                  >
                     {new Date(l.follow_up_at).toLocaleString()} {isOverdue ? "(Overdue)" : ""}
                   </div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
