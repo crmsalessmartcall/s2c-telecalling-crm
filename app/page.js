@@ -37,20 +37,39 @@ export default function HomePage() {
   const [activeTab, setActiveTab] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
 
-  // Point 2: Tenants & License Periods state
+  // Tenants & License Blocks state
   const [tenants, setTenants] = useState([]);
   const [expandedTenantId, setExpandedTenantId] = useState(null);
   const [tenantForm, setTenantForm] = useState({
     tenant_name: "",
-    max_licenses: 10,
+    max_licenses: 5,
+    duration_months: 1,
     admin_name: "",
     admin_email: "",
     admin_password: "",
   });
 
-  // Placeholder state for upcoming points (Points 3-5)
+  // Add Seat Block modal/panel state for Super Admin / Platform Ops
+  const [seatBlockTarget, setSeatBlockTarget] = useState(null);
+  const [seatBlockForm, setSeatBlockForm] = useState({
+    seat_count: 3,
+    starts_at: "",
+    ends_at: "",
+    duration_months: 1,
+    reason: "1-month seat block",
+  });
+
+  // Tenant Admin Team & Licenses state
   const [teamUsers, setTeamUsers] = useState([]);
-  const [licenseInfo, setLicenseInfo] = useState({ used: 0, max: 0 });
+  const [licenseInfo, setLicenseInfo] = useState({ used: 0, max: 0, remaining: 0, overCapacity: 0 });
+  const [newUserForm, setNewUserForm] = useState({
+    full_name: "",
+    email: "",
+    password: "",
+    role: "agent",
+  });
+
+  // Placeholder state for upcoming points (Points 4-5)
   const [projects, setProjects] = useState([]);
 
   const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
@@ -79,10 +98,14 @@ export default function HomePage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (uRes.ok) {
+        const activeSeats = uRes.data.active_seats ?? uRes.data.tenant?.max_licenses ?? 0;
+        const used = uRes.data.used_licenses ?? 0;
         setTeamUsers(uRes.data.users || []);
         setLicenseInfo({
-          used: uRes.data.used_licenses ?? 0,
-          max: uRes.data.tenant?.max_licenses ?? 0,
+          used,
+          max: activeSeats,
+          remaining: Math.max(0, activeSeats - used),
+          overCapacity: Math.max(0, used - activeSeats),
         });
       }
     }
@@ -103,9 +126,9 @@ export default function HomePage() {
     try {
       const { data } = await supabase.auth.getSession();
       const currentSession = data?.session || null;
-      setSession(currentSession);
 
       if (!currentSession?.user) {
+        setSession(null);
         setProfile(null);
         return;
       }
@@ -117,11 +140,29 @@ export default function HomePage() {
         .maybeSingle();
 
       if (error || !prof) {
+        setSession(null);
         setProfile(null);
         setStatusMessage(error?.message || "Profile not found for authenticated user.");
         return;
       }
 
+      // Check seat availability for tenant members on login
+      const seatCheck = await safeJsonFetch("/api/auth/check-seat", {
+        headers: { Authorization: `Bearer ${currentSession.access_token}` },
+      });
+
+      if (!seatCheck.ok || seatCheck.data?.allowed === false) {
+        await supabase.auth.signOut();
+        setSession(null);
+        setProfile(null);
+        setAuthError(
+          seatCheck.data?.error ||
+            "Login blocked: no active seat license available for this account."
+        );
+        return;
+      }
+
+      setSession(currentSession);
       setProfile(prof);
       await loadRoleData(currentSession, prof);
     } catch (err) {
@@ -135,13 +176,11 @@ export default function HomePage() {
     hydrateSession();
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession || null);
       if (!nextSession?.user) {
+        setSession(null);
         setProfile(null);
         setActiveTab("");
         setLoading(false);
-      } else {
-        hydrateSession();
       }
     });
 
@@ -173,6 +212,14 @@ export default function HomePage() {
     if (!session?.access_token) return;
     setStatusMessage("");
 
+    const startsAt = new Date().toISOString();
+    let endsAt = null;
+    if (Number(tenantForm.duration_months) > 0) {
+      const endDate = new Date(startsAt);
+      endDate.setMonth(endDate.getMonth() + Number(tenantForm.duration_months));
+      endsAt = endDate.toISOString();
+    }
+
     const res = await safeJsonFetch("/api/admin/tenants", {
       method: "POST",
       headers: {
@@ -182,6 +229,9 @@ export default function HomePage() {
       body: JSON.stringify({
         tenant_name: tenantForm.tenant_name,
         max_licenses: Number(tenantForm.max_licenses),
+        license_starts_at: startsAt,
+        license_ends_at: endsAt,
+        reason: `Initial ${tenantForm.duration_months || "open"}-month seat block`,
         telephony_config: { provider: "smartcall" },
         admin_name: tenantForm.admin_name,
         admin_email: tenantForm.admin_email,
@@ -196,7 +246,8 @@ export default function HomePage() {
 
     setTenantForm({
       tenant_name: "",
-      max_licenses: 10,
+      max_licenses: 5,
+      duration_months: 1,
       admin_name: "",
       admin_email: "",
       admin_password: "",
@@ -205,19 +256,22 @@ export default function HomePage() {
     await loadRoleData(session, profile);
   }
 
-  async function handleEditSeats(tenant) {
-    if (!session?.access_token) return;
-    const nextSeats = window.prompt(
-      `Seat count for ${tenant.name} (Tenant ID: ${tenant.id}):`,
-      String(tenant.max_licenses ?? 0)
-    );
-    if (nextSeats === null) return;
+  function openSeatBlockEditor(tenant) {
+    setSeatBlockTarget(tenant);
+    setSeatBlockForm({
+      seat_count: 2,
+      starts_at: "",
+      ends_at: "",
+      duration_months: 6,
+      reason: "Additional seat block",
+    });
+  }
 
-    const startsAt = window.prompt("Start date/time (blank = now, e.g. 2026-12-01):", "") || "";
-    const endsAt = window.prompt("End date/time (blank = open-ended, e.g. 2026-12-31):", "") || "";
-    const reason = window.prompt("Reason / note:", "Seat license update") || "";
-
+  async function handleAddSeatBlock(e) {
+    e.preventDefault();
+    if (!session?.access_token || !seatBlockTarget) return;
     setStatusMessage("");
+
     const res = await safeJsonFetch("/api/admin/tenants", {
       method: "PATCH",
       headers: {
@@ -225,20 +279,51 @@ export default function HomePage() {
         Authorization: `Bearer ${session.access_token}`,
       },
       body: JSON.stringify({
-        tenant_id: tenant.id,
-        max_licenses: Number(nextSeats),
-        starts_at: startsAt || undefined,
-        ends_at: endsAt || undefined,
-        reason,
+        action: "add_block",
+        tenant_id: seatBlockTarget.id,
+        seat_count: Number(seatBlockForm.seat_count),
+        starts_at: seatBlockForm.starts_at || undefined,
+        ends_at: seatBlockForm.ends_at || undefined,
+        duration_months: seatBlockForm.ends_at ? undefined : Number(seatBlockForm.duration_months) || 0,
+        reason: seatBlockForm.reason,
       }),
     });
 
     if (!res.ok) {
-      setStatusMessage(res.data.error || "Failed to update seats.");
+      setStatusMessage(res.data.error || "Failed to add seat block.");
       return;
     }
 
-    setStatusMessage(`Updated "${tenant.name}" to ${nextSeats} seats (Changed by: ${profile?.id}).`);
+    setStatusMessage(
+      `Added ${seatBlockForm.seat_count} seat(s) to "${seatBlockTarget.name}". Active seats now: ${res.data.active_seats} (Changed by: ${profile?.id}).`
+    );
+    setSeatBlockTarget(null);
+    await loadRoleData(session, profile);
+  }
+
+  async function handleEndSeatBlock(tenantId, periodId) {
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/admin/tenants", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        action: "end_block",
+        tenant_id: tenantId,
+        period_id: periodId,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to end seat block.");
+      return;
+    }
+
+    setStatusMessage(`Seat block ended. Active seats now: ${res.data.active_seats}.`);
     await loadRoleData(session, profile);
   }
 
@@ -264,6 +349,82 @@ export default function HomePage() {
     }
 
     setStatusMessage("Tenant deleted.");
+    await loadRoleData(session, profile);
+  }
+
+  async function handleAddTeamUser(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/tenant/users", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify(newUserForm),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to add user.");
+      return;
+    }
+
+    setNewUserForm({ full_name: "", email: "", password: "", role: "agent" });
+    setStatusMessage(`Added user "${res.data.user?.full_name || res.data.user?.email}".`);
+    await loadRoleData(session, profile);
+  }
+
+  async function handleToggleUserActive(user) {
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/tenant/users", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        user_id: user.id,
+        is_active: !user.is_active,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to update user status.");
+      return;
+    }
+
+    setStatusMessage(
+      `${user.email} is now ${!user.is_active ? "ACTIVE (using 1 seat)" : "DISABLED (seat freed for others)"}.`
+    );
+    await loadRoleData(session, profile);
+  }
+
+  async function handleDeleteTeamUser(user) {
+    if (!session?.access_token) return;
+    if (typeof window !== "undefined" && !window.confirm(`Delete user ${user.email} and free the seat?`)) {
+      return;
+    }
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/tenant/users", {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ user_id: user.id }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to delete user.");
+      return;
+    }
+
+    setStatusMessage(`Deleted ${user.email} and freed seat.`);
     await loadRoleData(session, profile);
   }
 
@@ -343,7 +504,7 @@ export default function HomePage() {
           <section>
             {profile.role === "super_admin" && (
               <div style={{ marginBottom: 24, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-                <h3 style={{ marginTop: 0 }}>Create Customer Tenant</h3>
+                <h3 style={{ marginTop: 0 }}>Create Customer Tenant & Initial Seat Block</h3>
                 <form onSubmit={handleCreateTenant} style={{ display: "grid", gap: 8, maxWidth: 480 }}>
                   <input
                     placeholder="Company / Tenant Name"
@@ -351,14 +512,25 @@ export default function HomePage() {
                     onChange={(e) => setTenantForm((f) => ({ ...f, tenant_name: e.target.value }))}
                     required
                   />
-                  <input
-                    type="number"
-                    min="1"
-                    placeholder="Seat Licenses (e.g. 5, 10, 50)"
-                    value={tenantForm.max_licenses}
-                    onChange={(e) => setTenantForm((f) => ({ ...f, max_licenses: e.target.value }))}
-                    required
-                  />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="Initial Seats (e.g. 3)"
+                      value={tenantForm.max_licenses}
+                      onChange={(e) => setTenantForm((f) => ({ ...f, max_licenses: e.target.value }))}
+                      required
+                      style={{ flex: 1 }}
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="Duration Months (e.g. 1 or 6)"
+                      value={tenantForm.duration_months}
+                      onChange={(e) => setTenantForm((f) => ({ ...f, duration_months: e.target.value }))}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
                   <input
                     placeholder="Tenant Admin Name"
                     value={tenantForm.admin_name}
@@ -384,14 +556,90 @@ export default function HomePage() {
               </div>
             )}
 
+            {seatBlockTarget && (
+              <div
+                style={{
+                  marginBottom: 24,
+                  padding: 14,
+                  border: "1px solid #334155",
+                  borderRadius: 8,
+                  background: "#f8fafc",
+                  maxWidth: 520,
+                }}
+              >
+                <h3 style={{ marginTop: 0 }}>
+                  Add Time-Bound Seat Block — {seatBlockTarget.name}
+                </h3>
+                <p style={{ fontSize: 12, color: "#475569", marginTop: 0 }}>
+                  Stacks with existing active blocks (e.g., +3 seats for 1 month and +2 seats for 6 months = 5 active seats).
+                </p>
+                <form onSubmit={handleAddSeatBlock} style={{ display: "grid", gap: 8 }}>
+                  <label style={{ fontSize: 12 }}>
+                    Additional Seats:
+                    <input
+                      type="number"
+                      min="1"
+                      value={seatBlockForm.seat_count}
+                      onChange={(e) => setSeatBlockForm((f) => ({ ...f, seat_count: e.target.value }))}
+                      required
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                  <label style={{ fontSize: 12 }}>
+                    Duration (Months, if End Date is left blank):
+                    <input
+                      type="number"
+                      min="0"
+                      value={seatBlockForm.duration_months}
+                      onChange={(e) => setSeatBlockForm((f) => ({ ...f, duration_months: e.target.value }))}
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                  <label style={{ fontSize: 12 }}>
+                    Custom Start Date/Time (optional):
+                    <input
+                      type="datetime-local"
+                      value={seatBlockForm.starts_at}
+                      onChange={(e) => setSeatBlockForm((f) => ({ ...f, starts_at: e.target.value }))}
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                  <label style={{ fontSize: 12 }}>
+                    Custom End Date/Time (optional—overrides duration months):
+                    <input
+                      type="datetime-local"
+                      value={seatBlockForm.ends_at}
+                      onChange={(e) => setSeatBlockForm((f) => ({ ...f, ends_at: e.target.value }))}
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                  <label style={{ fontSize: 12 }}>
+                    Reason / Plan Note:
+                    <input
+                      placeholder="e.g. 1-month pack (3 users) or 6-month pack (2 users)"
+                      value={seatBlockForm.reason}
+                      onChange={(e) => setSeatBlockForm((f) => ({ ...f, reason: e.target.value }))}
+                      style={{ width: "100%", marginTop: 2 }}
+                    />
+                  </label>
+                  <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                    <button type="submit">Save Seat Block</button>
+                    <button type="button" onClick={() => setSeatBlockTarget(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
             <h3>Tenants & Licenses ({tenants.length})</h3>
             <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
                   <th>Tenant & Unique ID</th>
                   <th>Status</th>
-                  <th>Used / Seats</th>
-                  <th>Available</th>
+                  <th>Active Users / Active Seats</th>
+                  <th>Available Seats</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -405,14 +653,25 @@ export default function HomePage() {
                         </div>
                         <code style={{ fontSize: 11 }}>{t.id}</code>
                       </td>
-                      <td>{t.status}</td>
+                      <td>
+                        {t.status}
+                        {t.over_capacity > 0 && (
+                          <div style={{ color: "#b91c1c", fontSize: 11, fontWeight: "bold" }}>
+                            Over seat limit by {t.over_capacity}
+                          </div>
+                        )}
+                      </td>
                       <td>
                         {t.used_licenses} / {t.max_licenses}
                       </td>
                       <td>{t.remaining_licenses}</td>
                       <td>
-                        <button type="button" onClick={() => handleEditSeats(t)} style={{ marginRight: 6 }}>
-                          Edit Seats
+                        <button
+                          type="button"
+                          onClick={() => openSeatBlockEditor(t)}
+                          style={{ marginRight: 6 }}
+                        >
+                          + Add Seat Block
                         </button>
                         {profile.role === "super_admin" && (
                           <button
@@ -435,7 +694,7 @@ export default function HomePage() {
                       <tr>
                         <td colSpan="5" style={{ background: "#f8fafc" }}>
                           <strong>
-                            License Periods History (Tenant ID: <code>{t.id}</code>)
+                            License Blocks & History (Tenant ID: <code>{t.id}</code>)
                           </strong>
                           <table
                             border="1"
@@ -445,30 +704,45 @@ export default function HomePage() {
                             <thead>
                               <tr>
                                 <th>Seats</th>
+                                <th>Period Status</th>
                                 <th>Start Date</th>
                                 <th>End Date</th>
                                 <th>Changed By ID</th>
                                 <th>Reason</th>
+                                <th>Block Action</th>
                               </tr>
                             </thead>
                             <tbody>
                               {(t.license_periods || []).map((lp) => (
                                 <tr key={lp.id}>
-                                  <td>{lp.seat_count}</td>
+                                  <td>+{lp.seat_count}</td>
+                                  <td>{lp.is_active_now ? "Active Now" : "Ended / Scheduled"}</td>
                                   <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
                                   <td>
-                                    {lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Active / Open"}
+                                    {lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Open-ended"}
                                   </td>
                                   <td>
                                     <code>{lp.changed_by || "-"}</code>{" "}
                                     {lp.changed_by_name ? `(${lp.changed_by_name})` : ""}
                                   </td>
                                   <td>{lp.reason || "-"}</td>
+                                  <td>
+                                    {lp.is_active_now ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleEndSeatBlock(t.id, lp.id)}
+                                      >
+                                        End Now
+                                      </button>
+                                    ) : (
+                                      "-"
+                                    )}
+                                  </td>
                                 </tr>
                               ))}
                               {(!t.license_periods || t.license_periods.length === 0) && (
                                 <tr>
-                                  <td colSpan="5">No license periods recorded yet.</td>
+                                  <td colSpan="7">No license blocks recorded yet.</td>
                                 </tr>
                               )}
                             </tbody>
@@ -491,11 +765,102 @@ export default function HomePage() {
       {activeTab === "Team & Licenses" && profile.role === "tenant_admin" && (
         <section>
           <h3>
-            Team & Licenses — {licenseInfo.used} / {licenseInfo.max} seats used ({teamUsers.length} users)
+            Team & Licenses — {licenseInfo.used} / {licenseInfo.max} active seats used (
+            {licenseInfo.remaining} available)
           </h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>
-            Dedicated team user and seat-release view (coming in Point 3).
-          </p>
+
+          {licenseInfo.overCapacity > 0 && (
+            <div
+              style={{
+                padding: 10,
+                marginBottom: 14,
+                borderRadius: 6,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                color: "#991b1b",
+                fontSize: 13,
+              }}
+            >
+              Active seats are exceeded by <strong>{licenseInfo.overCapacity}</strong> user(s). Disable or
+              delete users below so remaining active team members can continue working, or request more seats.
+            </div>
+          )}
+
+          <div style={{ marginBottom: 20, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+            <h4 style={{ marginTop: 0 }}>Add Team Member</h4>
+            <form onSubmit={handleAddTeamUser} style={{ display: "grid", gap: 8, maxWidth: 460 }}>
+              <input
+                placeholder="Full Name"
+                value={newUserForm.full_name}
+                onChange={(e) => setNewUserForm((f) => ({ ...f, full_name: e.target.value }))}
+                required
+              />
+              <input
+                type="email"
+                placeholder="Work Email"
+                value={newUserForm.email}
+                onChange={(e) => setNewUserForm((f) => ({ ...f, email: e.target.value }))}
+                required
+              />
+              <input
+                type="password"
+                placeholder="Temporary Password"
+                value={newUserForm.password}
+                onChange={(e) => setNewUserForm((f) => ({ ...f, password: e.target.value }))}
+                required
+              />
+              <select
+                value={newUserForm.role}
+                onChange={(e) => setNewUserForm((f) => ({ ...f, role: e.target.value }))}
+              >
+                <option value="agent">Agent</option>
+                <option value="team_leader">Team Leader</option>
+                <option value="supervisor">Supervisor</option>
+              </select>
+              <button type="submit" disabled={licenseInfo.remaining <= 0}>
+                {licenseInfo.remaining > 0 ? "Add User (Uses 1 Seat)" : "No Seats Available"}
+              </button>
+            </form>
+          </div>
+
+          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Seat Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {teamUsers.map((u) => (
+                <tr key={u.id}>
+                  <td>{u.full_name}</td>
+                  <td>{u.email}</td>
+                  <td><code>{u.role}</code></td>
+                  <td>{u.is_active ? "Active (1 seat)" : "Disabled (seat free)"}</td>
+                  <td>
+                    {u.id !== profile.id && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleUserActive(u)}
+                          style={{ marginRight: 6 }}
+                        >
+                          {u.is_active ? "Disable User" : "Enable User"}
+                        </button>
+                        <button type="button" onClick={() => handleDeleteTeamUser(u)}>
+                          Delete User
+                        </button>
+                      </>
+                    )}
+                    {u.id === profile.id && <span>Current Admin</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       )}
 
