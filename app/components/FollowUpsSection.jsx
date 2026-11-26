@@ -4,11 +4,20 @@ import { useMemo, useState } from "react";
 import { safeJsonFetch } from "@/lib/crmHelpers";
 
 function formatLocalInput(isoVal) {
-  if (!isoVal) return "";
+  if (!isoVal) {
+    return "";
+  }
   const d = new Date(isoVal);
-  if (Number.isNaN(d.getTime())) return "";
+  if (Number.isNaN(d.getTime())) {
+    return "";
+  }
   const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const hours = pad(d.getHours());
+  const minutes = pad(d.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
 export default function FollowUpsSection({
@@ -45,10 +54,14 @@ export default function FollowUpsSection({
     return (leads || [])
       .filter((l) => Boolean(l.follow_up_at))
       .filter((l) => {
-        if (projectFilter && l.project_id !== projectFilter) return false;
+        if (projectFilter && l.project_id !== projectFilter) {
+          return false;
+        }
 
         if (dispositionFilter !== "all") {
-          if (dispositionFilter === "__none__" && l.disposition) return false;
+          if (dispositionFilter === "__none__" && l.disposition) {
+            return false;
+          }
           if (dispositionFilter !== "__none__" && (l.disposition || "") !== dispositionFilter) {
             return false;
           }
@@ -56,9 +69,15 @@ export default function FollowUpsSection({
 
         const fuMs = new Date(l.follow_up_at).getTime();
         if (!Number.isNaN(fuMs)) {
-          if (timingFilter === "overdue" && fuMs >= now.getTime()) return false;
-          if (timingFilter === "today" && (fuMs < startOfToday || fuMs >= endOfToday)) return false;
-          if (timingFilter === "upcoming" && fuMs < now.getTime()) return false;
+          if (timingFilter === "overdue" && fuMs >= now.getTime()) {
+            return false;
+          }
+          if (timingFilter === "today" && (fuMs < startOfToday || fuMs >= endOfToday)) {
+            return false;
+          }
+          if (timingFilter === "upcoming" && fuMs < now.getTime()) {
+            return false;
+          }
         }
 
         if (search.trim()) {
@@ -68,7 +87,9 @@ export default function FollowUpsSection({
             String(l.phone || "").toLowerCase().includes(q) ||
             String(l.disposition || "").toLowerCase().includes(q) ||
             String(l.notes || "").toLowerCase().includes(q);
-          if (!hit) return false;
+          if (!hit) {
+            return false;
+          }
         }
 
         return true;
@@ -77,7 +98,10 @@ export default function FollowUpsSection({
   }, [leads, projectFilter, timingFilter, dispositionFilter, search]);
 
   async function handleSaveReschedule(lead, overrideIso = null) {
-    if (!session?.access_token) return;
+    if (!session?.access_token) {
+      return;
+    }
+
     const rawVal = overrideIso
       ? formatLocalInput(overrideIso)
       : draftTimes[lead.id] !== undefined
@@ -121,6 +145,17 @@ export default function FollowUpsSection({
       setSavingId(null);
     }
   }
+
+  function handleResetFilters() {
+    setProjectFilter("");
+    setTimingFilter("all");
+    setDispositionFilter("all");
+    setSearch("");
+  }
+
+  const hasActiveFilters = Boolean(
+    projectFilter || timingFilter !== "all" || dispositionFilter !== "all" || search
+  );
 
   return (
     <section>
@@ -183,22 +218,18 @@ export default function FollowUpsSection({
           style={{ width: 200, padding: 5 }}
         />
 
-        {(projectFilter || timingFilter !== "all" || dispositionFilter !== "all" || search) && (
-          <button
-            type="button"
-            onClick={() => {
-              setProjectFilter("");
-              setTimingFilter("all");
-              setDispositionFilter("all");
-              setSearch("");
-            }}
-          >
+        {hasActiveFilters && (
+          <button type="button" onClick={handleResetFilters}>
             Reset
           </button>
         )}
       </div>
 
-      <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+      <table
+        border="1"
+        cellPadding="8"
+        style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+      >
         <thead>
           <tr>
             <th>Lead</th>
@@ -215,6 +246,7 @@ export default function FollowUpsSection({
             const isOverdue = !Number.isNaN(fuMs) && fuMs < Date.now();
             const currentInputVal =
               draftTimes[l.id] !== undefined ? draftTimes[l.id] : formatLocalInput(l.follow_up_at);
+            const next24hIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
             return (
               <tr key={l.id}>
@@ -253,9 +285,7 @@ export default function FollowUpsSection({
                     <button
                       type="button"
                       disabled={savingId === l.id}
-                      onClick={() =>
-                        handleSaveReschedule(l, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
-                      }
+                      onClick={() => handleSaveReschedule(l, next24hIso)}
                     >
                       +24h
                     </button>
