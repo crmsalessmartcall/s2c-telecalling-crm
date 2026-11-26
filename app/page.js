@@ -37,16 +37,13 @@ export default function HomePage() {
   const [activeTab, setActiveTab] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
 
-  // Tenants & License Blocks state
+  // Point 2: Tenants & License Blocks state
   const [tenants, setTenants] = useState([]);
   const [expandedTenantId, setExpandedTenantId] = useState(null);
   const [showCreateTenant, setShowCreateTenant] = useState(false);
-
-  // Filters: Tenant ID (1, 2, 3...), Name, and State (all | active | disabled)
   const [filterId, setFilterId] = useState("");
   const [filterName, setFilterName] = useState("");
   const [filterState, setFilterState] = useState("all");
-
   const [tenantForm, setTenantForm] = useState({
     tenant_name: "",
     max_licenses: 5,
@@ -56,7 +53,6 @@ export default function HomePage() {
     admin_password: "",
   });
 
-  // Add Seat Block panel state for Super Admin / Platform Ops
   const [seatBlockTarget, setSeatBlockTarget] = useState(null);
   const [seatBlockForm, setSeatBlockForm] = useState({
     seat_count: 3,
@@ -66,7 +62,7 @@ export default function HomePage() {
     reason: "1-month seat block",
   });
 
-  // Tenant Admin Team & Licenses state
+  // Point 3: Tenant Admin Team & Licenses state
   const [teamUsers, setTeamUsers] = useState([]);
   const [licenseInfo, setLicenseInfo] = useState({ used: 0, max: 0, remaining: 0, overCapacity: 0 });
   const [newUserForm, setNewUserForm] = useState({
@@ -76,10 +72,55 @@ export default function HomePage() {
     role: "agent",
   });
 
-  // Placeholder state for upcoming points (Points 4-5)
+  // Point 4: Campaigns, Call Config, Leads & Follow-Ups state
   const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedTenantScope, setSelectedTenantScope] = useState("");
+  const [projectForm, setProjectForm] = useState({ name: "", description: "" });
+
+  const [callFields, setCallFields] = useState([]);
+  const [dispositions, setDispositions] = useState([]);
+  const [fieldForm, setFieldForm] = useState({ label: "", field_type: "text" });
+  const [dispositionForm, setDispositionForm] = useState({ name: "", requires_followup: false });
+
+  const [leads, setLeads] = useState([]);
+  const [leadSearch, setLeadSearch] = useState("");
+  const [leadForm, setLeadForm] = useState({
+    name: "",
+    phone: "",
+    email: "",
+    notes: "",
+    follow_up_at: "",
+  });
+  const [csvText, setCsvText] = useState("name,phone,email,city\nRahul Sharma,9876543210,rahul@example.com,Mumbai");
 
   const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
+
+  async function loadCampaignAndLeadsData(token, currentProfile, projectId = "", tenantScope = "") {
+    const params = new URLSearchParams();
+    if (projectId) params.set("project_id", projectId);
+    if (currentProfile.role === "super_admin" && tenantScope) {
+      params.set("tenant_id", tenantScope);
+    }
+
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    const [cfgRes, leadsRes] = await Promise.all([
+      safeJsonFetch(`/api/call-config${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      safeJsonFetch(`/api/leads${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+    ]);
+
+    if (cfgRes.ok) {
+      setCallFields(cfgRes.data.call_fields || []);
+      setDispositions(cfgRes.data.dispositions || []);
+    }
+    if (leadsRes.ok) {
+      setLeads(leadsRes.data.leads || []);
+    }
+  }
 
   async function loadRoleData(currentSession, currentProfile) {
     if (!currentSession?.access_token || !currentProfile?.role) return;
@@ -94,7 +135,11 @@ export default function HomePage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (tRes.ok) {
-        setTenants(tRes.data.tenants || []);
+        const list = tRes.data.tenants || [];
+        setTenants(list);
+        if (role === "super_admin" && !selectedTenantScope && list[0]?.id) {
+          setSelectedTenantScope(list[0].id);
+        }
       } else {
         setStatusMessage(tRes.data.error || "Could not load tenants.");
       }
@@ -118,11 +163,27 @@ export default function HomePage() {
     }
 
     if (role !== "platform_ops") {
-      const pRes = await safeJsonFetch("/api/projects", {
+      const pUrl =
+        role === "super_admin" && selectedTenantScope
+          ? `/api/projects?tenant_id=${encodeURIComponent(selectedTenantScope)}`
+          : "/api/projects";
+      const pRes = await safeJsonFetch(pUrl, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (pRes.ok) {
-        setProjects(pRes.data.projects || []);
+        const projList = pRes.data.projects || [];
+        setProjects(projList);
+        const activeProj =
+          selectedProjectId && projList.some((p) => p.id === selectedProjectId)
+            ? selectedProjectId
+            : projList[0]?.id || "";
+        setSelectedProjectId(activeProj);
+        await loadCampaignAndLeadsData(
+          token,
+          currentProfile,
+          activeProj,
+          role === "super_admin" ? selectedTenantScope : ""
+        );
       }
     }
   }
@@ -464,6 +525,200 @@ export default function HomePage() {
     await loadRoleData(session, profile);
   }
 
+  // Point 4 Handlers
+  async function handleCreateProject(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/projects", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        name: projectForm.name,
+        description: projectForm.description,
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to create campaign.");
+      return;
+    }
+
+    setProjectForm({ name: "", description: "" });
+    setStatusMessage(`Created campaign "${res.data.project?.name}".`);
+    if (res.data.project?.id) {
+      setSelectedProjectId(res.data.project.id);
+    }
+    await loadRoleData(session, profile);
+  }
+
+  async function handleAddCallField(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/call-config", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        kind: "field",
+        label: fieldForm.label,
+        field_type: fieldForm.field_type,
+        project_id: selectedProjectId || null,
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to add call field.");
+      return;
+    }
+
+    setFieldForm({ label: "", field_type: "text" });
+    setStatusMessage(`Added call field "${res.data.field?.label}".`);
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  async function handleAddDisposition(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/call-config", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        kind: "disposition",
+        name: dispositionForm.name,
+        requires_followup: dispositionForm.requires_followup,
+        project_id: selectedProjectId || null,
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to add disposition.");
+      return;
+    }
+
+    setDispositionForm({ name: "", requires_followup: false });
+    setStatusMessage(`Added disposition "${res.data.disposition?.name}".`);
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  async function handleAddSingleLead(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/leads", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        ...leadForm,
+        project_id: selectedProjectId || null,
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to add lead.");
+      return;
+    }
+
+    setLeadForm({ name: "", phone: "", email: "", notes: "", follow_up_at: "" });
+    setStatusMessage(`Added lead "${res.data.lead?.name}".`);
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  async function handleUploadCsv(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/leads/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        csv_text: csvText,
+        project_id: selectedProjectId || null,
+        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to upload CSV leads.");
+      return;
+    }
+
+    setStatusMessage(`Uploaded ${res.data.uploaded_count || 0} lead(s).`);
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
+  async function handleUpdateLead(leadId, patch) {
+    if (!session?.access_token) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/leads", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ lead_id: leadId, ...patch }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to update lead.");
+      return;
+    }
+
+    setStatusMessage("Lead updated.");
+    await loadCampaignAndLeadsData(
+      session.access_token,
+      profile,
+      selectedProjectId,
+      profile.role === "super_admin" ? selectedTenantScope : ""
+    );
+  }
+
   const filteredTenants = tenants.filter((t) => {
     const cleanId = filterId.trim().replace(/^#/, "");
     if (cleanId && String(t.numeric_id) !== cleanId) return false;
@@ -474,6 +729,19 @@ export default function HomePage() {
     if (filterState !== "all" && stateValue !== filterState) return false;
     return true;
   });
+
+  const filteredLeads = leads.filter((l) => {
+    if (!leadSearch.trim()) return true;
+    const q = leadSearch.trim().toLowerCase();
+    return (
+      String(l.name || "").toLowerCase().includes(q) ||
+      String(l.phone || "").toLowerCase().includes(q) ||
+      String(l.disposition || "").toLowerCase().includes(q) ||
+      String(l.status || "").toLowerCase().includes(q)
+    );
+  });
+
+  const followupLeads = leads.filter((l) => Boolean(l.follow_up_at));
 
   if (loading) {
     return <div style={{ padding: 24, fontFamily: "sans-serif" }}>Loading workspace...</div>;
@@ -573,7 +841,6 @@ export default function HomePage() {
               )}
             </div>
 
-            {/* Filter Controls: Tenant ID (1, 2, 3...), Tenant Name, State */}
             <div
               style={{
                 display: "flex",
@@ -690,9 +957,6 @@ export default function HomePage() {
                 <h4 style={{ marginTop: 0 }}>
                   Add Time-Bound Seat Block — #{seatBlockTarget.numeric_id} {seatBlockTarget.name}
                 </h4>
-                <p style={{ fontSize: 12, color: "#475569", marginTop: 0 }}>
-                  Stacks with existing active blocks (e.g., +3 seats for 1 month and +2 seats for 6 months = 5 active seats).
-                </p>
                 <form onSubmit={handleAddSeatBlock} style={{ display: "grid", gap: 8 }}>
                   <label style={{ fontSize: 12 }}>
                     Additional Seats:
@@ -1004,10 +1268,319 @@ export default function HomePage() {
 
       {activeTab === "Campaigns & Leads" && (
         <section>
-          <h3>Campaigns & Leads ({projects.length} campaigns)</h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>
-            Dedicated campaign and lead view (coming in Point 4).
-          </p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+            <h3 style={{ margin: 0 }}>Campaigns & Leads</h3>
+
+            {profile.role === "super_admin" && tenants.length > 0 && (
+              <label style={{ fontSize: 13 }}>
+                Tenant:{" "}
+                <select
+                  value={selectedTenantScope}
+                  onChange={async (e) => {
+                    const nextTenant = e.target.value;
+                    setSelectedTenantScope(nextTenant);
+                    const pRes = await safeJsonFetch(
+                      `/api/projects?tenant_id=${encodeURIComponent(nextTenant)}`,
+                      { headers: { Authorization: `Bearer ${session.access_token}` } }
+                    );
+                    const list = pRes.ok ? pRes.data.projects || [] : [];
+                    setProjects(list);
+                    const firstProj = list[0]?.id || "";
+                    setSelectedProjectId(firstProj);
+                    await loadCampaignAndLeadsData(session.access_token, profile, firstProj, nextTenant);
+                  }}
+                >
+                  {tenants.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      #{t.numeric_id} {t.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            <label style={{ fontSize: 13 }}>
+              Campaign:{" "}
+              <select
+                value={selectedProjectId}
+                onChange={async (e) => {
+                  const nextProj = e.target.value;
+                  setSelectedProjectId(nextProj);
+                  await loadCampaignAndLeadsData(
+                    session.access_token,
+                    profile,
+                    nextProj,
+                    profile.role === "super_admin" ? selectedTenantScope : ""
+                  );
+                }}
+              >
+                <option value="">All Campaigns ({projects.length})</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {["super_admin", "tenant_admin"].includes(profile.role) && (
+            <div style={{ marginBottom: 20, padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Create Campaign</h4>
+              <form onSubmit={handleCreateProject} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input
+                  placeholder="Campaign Name"
+                  value={projectForm.name}
+                  onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
+                  required
+                />
+                <input
+                  placeholder="Description (optional)"
+                  value={projectForm.description}
+                  onChange={(e) => setProjectForm((f) => ({ ...f, description: e.target.value }))}
+                />
+                <button type="submit">Create Campaign</button>
+              </form>
+            </div>
+          )}
+
+          {/* Call Fields & Dispositions Config */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+              gap: 12,
+              marginBottom: 20,
+            }}
+          >
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Call Fields ({callFields.length})</h4>
+              {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
+                <form onSubmit={handleAddCallField} style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                  <input
+                    placeholder="Field label (e.g. City)"
+                    value={fieldForm.label}
+                    onChange={(e) => setFieldForm((f) => ({ ...f, label: e.target.value }))}
+                    required
+                  />
+                  <select
+                    value={fieldForm.field_type}
+                    onChange={(e) => setFieldForm((f) => ({ ...f, field_type: e.target.value }))}
+                  >
+                    <option value="text">Text</option>
+                    <option value="number">Number</option>
+                    <option value="date">Date</option>
+                  </select>
+                  <button type="submit">Add</button>
+                </form>
+              )}
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {callFields.map((cf) => (
+                  <li key={cf.id}>
+                    {cf.label} <code>({cf.field_type})</code>
+                  </li>
+                ))}
+                {callFields.length === 0 && <li>No custom fields yet.</li>}
+              </ul>
+            </div>
+
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Dispositions ({dispositions.length})</h4>
+              {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
+                <form onSubmit={handleAddDisposition} style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+                  <input
+                    placeholder="Disposition (e.g. Interested)"
+                    value={dispositionForm.name}
+                    onChange={(e) => setDispositionForm((f) => ({ ...f, name: e.target.value }))}
+                    required
+                  />
+                  <label style={{ fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={dispositionForm.requires_followup}
+                      onChange={(e) =>
+                        setDispositionForm((f) => ({ ...f, requires_followup: e.target.checked }))
+                      }
+                    />{" "}
+                    Follow-up
+                  </label>
+                  <button type="submit">Add</button>
+                </form>
+              )}
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {dispositions.map((d) => (
+                  <li key={d.id}>
+                    {d.name} {d.requires_followup ? "(Follow-Up)" : ""}
+                  </li>
+                ))}
+                {dispositions.length === 0 && <li>No dispositions configured yet.</li>}
+              </ul>
+            </div>
+          </div>
+
+          {/* Add Lead + CSV Upload */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+              gap: 12,
+              marginBottom: 20,
+            }}
+          >
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Add Single Lead</h4>
+              <form onSubmit={handleAddSingleLead} style={{ display: "grid", gap: 8 }}>
+                <input
+                  placeholder="Lead Name"
+                  value={leadForm.name}
+                  onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
+                  required
+                />
+                <input
+                  placeholder="Phone Number"
+                  value={leadForm.phone}
+                  onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
+                  required
+                />
+                <input
+                  placeholder="Email (optional)"
+                  value={leadForm.email}
+                  onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
+                />
+                <label style={{ fontSize: 12 }}>
+                  Follow-Up Date/Time (optional):
+                  <input
+                    type="datetime-local"
+                    value={leadForm.follow_up_at}
+                    onChange={(e) => setLeadForm((f) => ({ ...f, follow_up_at: e.target.value }))}
+                    style={{ width: "100%", marginTop: 2 }}
+                  />
+                </label>
+                <button type="submit">Add Lead</button>
+              </form>
+            </div>
+
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Bulk CSV Lead Upload</h4>
+              <form onSubmit={handleUploadCsv} style={{ display: "grid", gap: 8 }}>
+                <textarea
+                  rows={4}
+                  value={csvText}
+                  onChange={(e) => setCsvText(e.target.value)}
+                  style={{ width: "100%", fontSize: 12 }}
+                />
+                <button type="submit">Upload CSV Leads</button>
+              </form>
+            </div>
+          </div>
+
+          {/* Leads Table */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <h4 style={{ margin: 0 }}>Leads ({filteredLeads.length})</h4>
+            <input
+              placeholder="Search name, phone, status, disposition..."
+              value={leadSearch}
+              onChange={(e) => setLeadSearch(e.target.value)}
+              style={{ width: 260, padding: 6 }}
+            />
+          </div>
+
+          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th>Lead</th>
+                <th>Phone</th>
+                <th>Status</th>
+                <th>Disposition</th>
+                <th>Follow-Up</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredLeads.map((l) => (
+                <tr key={l.id}>
+                  <td>
+                    <strong>{l.name}</strong>
+                    {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
+                  </td>
+                  <td>{l.phone}</td>
+                  <td>
+                    <select
+                      value={l.status || "new"}
+                      onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
+                    >
+                      <option value="new">new</option>
+                      <option value="contacted">contacted</option>
+                      <option value="follow_up">follow_up</option>
+                      <option value="converted">converted</option>
+                      <option value="closed">closed</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select
+                      value={l.disposition || ""}
+                      onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
+                    >
+                      <option value="">-- Select --</option>
+                      {dispositions.map((d) => (
+                        <option key={d.id} value={d.name}>
+                          {d.name}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    <input
+                      type="datetime-local"
+                      value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
+                      onChange={(e) =>
+                        handleUpdateLead(l.id, {
+                          follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
+                        })
+                      }
+                    />
+                  </td>
+                </tr>
+              ))}
+              {filteredLeads.length === 0 && (
+                <tr>
+                  <td colSpan="5">No leads found for this selection.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {activeTab === "Follow-Ups" && (
+        <section>
+          <h3>Scheduled Follow-Ups ({followupLeads.length})</h3>
+          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th>Lead</th>
+                <th>Phone</th>
+                <th>Follow-Up Time</th>
+                <th>Disposition</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {followupLeads.map((l) => (
+                <tr key={l.id}>
+                  <td><strong>{l.name}</strong></td>
+                  <td>{l.phone}</td>
+                  <td>{l.follow_up_at ? new Date(l.follow_up_at).toLocaleString() : "-"}</td>
+                  <td>{l.disposition || "-"}</td>
+                  <td>{l.status || "follow_up"}</td>
+                </tr>
+              ))}
+              {followupLeads.length === 0 && (
+                <tr>
+                  <td colSpan="5">No scheduled follow-ups yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </section>
       )}
 
@@ -1017,13 +1590,6 @@ export default function HomePage() {
           <p style={{ color: "#475569", fontSize: 13 }}>
             Shown only on the Dialer tab—never across all tabs (coming in Point 5).
           </p>
-        </section>
-      )}
-
-      {activeTab === "Follow-Ups" && (
-        <section>
-          <h3>Follow-Ups</h3>
-          <p style={{ color: "#475569", fontSize: 13 }}>Scheduled callbacks and reminders view.</p>
         </section>
       )}
 
