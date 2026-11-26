@@ -40,6 +40,13 @@ export default function HomePage() {
   // Tenants & License Blocks state
   const [tenants, setTenants] = useState([]);
   const [expandedTenantId, setExpandedTenantId] = useState(null);
+  const [showCreateTenant, setShowCreateTenant] = useState(false);
+
+  // Filters: Tenant ID (1, 2, 3...), Name, and State (all | active | disabled)
+  const [filterId, setFilterId] = useState("");
+  const [filterName, setFilterName] = useState("");
+  const [filterState, setFilterState] = useState("all");
+
   const [tenantForm, setTenantForm] = useState({
     tenant_name: "",
     max_licenses: 5,
@@ -49,7 +56,7 @@ export default function HomePage() {
     admin_password: "",
   });
 
-  // Add Seat Block modal/panel state for Super Admin / Platform Ops
+  // Add Seat Block panel state for Super Admin / Platform Ops
   const [seatBlockTarget, setSeatBlockTarget] = useState(null);
   const [seatBlockForm, setSeatBlockForm] = useState({
     seat_count: 3,
@@ -146,7 +153,6 @@ export default function HomePage() {
         return;
       }
 
-      // Check seat availability for tenant members on login
       const seatCheck = await safeJsonFetch("/api/auth/check-seat", {
         headers: { Authorization: `Bearer ${currentSession.access_token}` },
       });
@@ -252,7 +258,8 @@ export default function HomePage() {
       admin_email: "",
       admin_password: "",
     });
-    setStatusMessage(`Created tenant "${res.data.tenant?.name || ""}" (ID: ${res.data.tenant?.id || ""}).`);
+    setShowCreateTenant(false);
+    setStatusMessage(`Created tenant "${res.data.tenant?.name || ""}".`);
     await loadRoleData(session, profile);
   }
 
@@ -323,7 +330,36 @@ export default function HomePage() {
       return;
     }
 
-    setStatusMessage(`Seat block ended. Active seats now: ${res.data.active_seats}.`);
+    setStatusMessage(
+      `Seat block ended. Active seats now: ${res.data.active_seats} (Tenant state: ${res.data.status}).`
+    );
+    await loadRoleData(session, profile);
+  }
+
+  async function handleToggleTenantState(tenant) {
+    if (!session?.access_token) return;
+    const nextState = tenant.effective_state === "disabled" ? "active" : "disabled";
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/admin/tenants", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        action: "set_status",
+        tenant_id: tenant.id,
+        status: nextState,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to update tenant state.");
+      return;
+    }
+
+    setStatusMessage(`Tenant "${tenant.name}" (#${tenant.numeric_id}) is now ${nextState}.`);
     await loadRoleData(session, profile);
   }
 
@@ -428,6 +464,17 @@ export default function HomePage() {
     await loadRoleData(session, profile);
   }
 
+  const filteredTenants = tenants.filter((t) => {
+    const cleanId = filterId.trim().replace(/^#/, "");
+    if (cleanId && String(t.numeric_id) !== cleanId) return false;
+    if (filterName.trim() && !String(t.name || "").toLowerCase().includes(filterName.trim().toLowerCase())) {
+      return false;
+    }
+    const stateValue = t.effective_state || t.status || "active";
+    if (filterState !== "all" && stateValue !== filterState) return false;
+    return true;
+  });
+
   if (loading) {
     return <div style={{ padding: 24, fontFamily: "sans-serif" }}>Loading workspace...</div>;
   }
@@ -502,9 +549,82 @@ export default function HomePage() {
       {activeTab === "Tenants & Licenses" &&
         ["super_admin", "platform_ops"].includes(profile.role) && (
           <section>
-            {profile.role === "super_admin" && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 12,
+                flexWrap: "wrap",
+                marginBottom: 16,
+              }}
+            >
+              <h3 style={{ margin: 0 }}>
+                Tenants & Licenses ({filteredTenants.length} of {tenants.length})
+              </h3>
+              {profile.role === "super_admin" && (
+                <button
+                  type="button"
+                  onClick={() => setShowCreateTenant((prev) => !prev)}
+                  style={{ padding: "7px 12px", fontWeight: "bold", cursor: "pointer" }}
+                >
+                  {showCreateTenant ? "Close Create Form" : "+ Create Tenant"}
+                </button>
+              )}
+            </div>
+
+            {/* Filter Controls: Tenant ID (1, 2, 3...), Tenant Name, State */}
+            <div
+              style={{
+                display: "flex",
+                gap: 10,
+                flexWrap: "wrap",
+                alignItems: "center",
+                marginBottom: 16,
+                padding: 10,
+                background: "#f8fafc",
+                border: "1px solid #cbd5e1",
+                borderRadius: 6,
+              }}
+            >
+              <input
+                placeholder="Filter by ID (e.g. 1, 2)"
+                value={filterId}
+                onChange={(e) => setFilterId(e.target.value)}
+                style={{ width: 150, padding: 6 }}
+              />
+              <input
+                placeholder="Filter by tenant name..."
+                value={filterName}
+                onChange={(e) => setFilterName(e.target.value)}
+                style={{ width: 220, padding: 6 }}
+              />
+              <select
+                value={filterState}
+                onChange={(e) => setFilterState(e.target.value)}
+                style={{ padding: 6 }}
+              >
+                <option value="all">All States</option>
+                <option value="active">Active</option>
+                <option value="disabled">Disabled / Expired</option>
+              </select>
+              {(filterId || filterName || filterState !== "all") && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterId("");
+                    setFilterName("");
+                    setFilterState("all");
+                  }}
+                >
+                  Clear Filters
+                </button>
+              )}
+            </div>
+
+            {profile.role === "super_admin" && showCreateTenant && (
               <div style={{ marginBottom: 24, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-                <h3 style={{ marginTop: 0 }}>Create Customer Tenant & Initial Seat Block</h3>
+                <h4 style={{ marginTop: 0 }}>Create Customer Tenant & Initial Seat Block</h4>
                 <form onSubmit={handleCreateTenant} style={{ display: "grid", gap: 8, maxWidth: 480 }}>
                   <input
                     placeholder="Company / Tenant Name"
@@ -567,9 +687,9 @@ export default function HomePage() {
                   maxWidth: 520,
                 }}
               >
-                <h3 style={{ marginTop: 0 }}>
-                  Add Time-Bound Seat Block — {seatBlockTarget.name}
-                </h3>
+                <h4 style={{ marginTop: 0 }}>
+                  Add Time-Bound Seat Block — #{seatBlockTarget.numeric_id} {seatBlockTarget.name}
+                </h4>
                 <p style={{ fontSize: 12, color: "#475569", marginTop: 0 }}>
                   Stacks with existing active blocks (e.g., +3 seats for 1 month and +2 seats for 6 months = 5 active seats).
                 </p>
@@ -632,129 +752,147 @@ export default function HomePage() {
               </div>
             )}
 
-            <h3>Tenants & Licenses ({tenants.length})</h3>
             <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  <th>Tenant & Unique ID</th>
-                  <th>Status</th>
+                  <th>ID</th>
+                  <th>Tenant</th>
+                  <th>State</th>
                   <th>Active Users / Active Seats</th>
                   <th>Available Seats</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {tenants.map((t) => (
-                  <Fragment key={t.id}>
-                    <tr>
-                      <td>
-                        <div>
-                          <strong>{t.name}</strong>
-                        </div>
-                        <code style={{ fontSize: 11 }}>{t.id}</code>
-                      </td>
-                      <td>
-                        {t.status}
-                        {t.over_capacity > 0 && (
-                          <div style={{ color: "#b91c1c", fontSize: 11, fontWeight: "bold" }}>
-                            Over seat limit by {t.over_capacity}
+                {filteredTenants.map((t) => {
+                  const stateLabel = t.effective_state || t.status || "active";
+                  return (
+                    <Fragment key={t.id}>
+                      <tr>
+                        <td>
+                          <strong>#{t.numeric_id}</strong>
+                        </td>
+                        <td>
+                          <div>
+                            <strong>{t.name}</strong>
                           </div>
-                        )}
-                      </td>
-                      <td>
-                        {t.used_licenses} / {t.max_licenses}
-                      </td>
-                      <td>{t.remaining_licenses}</td>
-                      <td>
-                        <button
-                          type="button"
-                          onClick={() => openSeatBlockEditor(t)}
-                          style={{ marginRight: 6 }}
-                        >
-                          + Add Seat Block
-                        </button>
-                        {profile.role === "super_admin" && (
+                          <code style={{ fontSize: 11, color: "#64748b" }}>{t.id}</code>
+                        </td>
+                        <td>
+                          <strong>{stateLabel}</strong>
+                          {t.license_expired && (
+                            <div style={{ color: "#b91c1c", fontSize: 11 }}>
+                              License finished / 0 active seats
+                            </div>
+                          )}
+                          {t.over_capacity > 0 && (
+                            <div style={{ color: "#b91c1c", fontSize: 11, fontWeight: "bold" }}>
+                              Over seat limit by {t.over_capacity}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          {t.used_licenses} / {t.max_licenses}
+                        </td>
+                        <td>{t.remaining_licenses}</td>
+                        <td>
                           <button
                             type="button"
-                            onClick={() => handleDeleteTenant(t.id)}
+                            onClick={() => openSeatBlockEditor(t)}
                             style={{ marginRight: 6 }}
                           >
-                            Delete
+                            + Add Seat Block
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => setExpandedTenantId((cur) => (cur === t.id ? null : t.id))}
-                        >
-                          {expandedTenantId === t.id ? "Hide History" : "History"}
-                        </button>
-                      </td>
-                    </tr>
-                    {expandedTenantId === t.id && (
-                      <tr>
-                        <td colSpan="5" style={{ background: "#f8fafc" }}>
-                          <strong>
-                            License Blocks & History (Tenant ID: <code>{t.id}</code>)
-                          </strong>
-                          <table
-                            border="1"
-                            cellPadding="6"
-                            style={{ width: "100%", borderCollapse: "collapse", marginTop: 8, fontSize: 12 }}
+                          <button
+                            type="button"
+                            onClick={() => handleToggleTenantState(t)}
+                            style={{ marginRight: 6 }}
                           >
-                            <thead>
-                              <tr>
-                                <th>Seats</th>
-                                <th>Period Status</th>
-                                <th>Start Date</th>
-                                <th>End Date</th>
-                                <th>Changed By ID</th>
-                                <th>Reason</th>
-                                <th>Block Action</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {(t.license_periods || []).map((lp) => (
-                                <tr key={lp.id}>
-                                  <td>+{lp.seat_count}</td>
-                                  <td>{lp.is_active_now ? "Active Now" : "Ended / Scheduled"}</td>
-                                  <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
-                                  <td>
-                                    {lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Open-ended"}
-                                  </td>
-                                  <td>
-                                    <code>{lp.changed_by || "-"}</code>{" "}
-                                    {lp.changed_by_name ? `(${lp.changed_by_name})` : ""}
-                                  </td>
-                                  <td>{lp.reason || "-"}</td>
-                                  <td>
-                                    {lp.is_active_now ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleEndSeatBlock(t.id, lp.id)}
-                                      >
-                                        End Now
-                                      </button>
-                                    ) : (
-                                      "-"
-                                    )}
-                                  </td>
-                                </tr>
-                              ))}
-                              {(!t.license_periods || t.license_periods.length === 0) && (
-                                <tr>
-                                  <td colSpan="7">No license blocks recorded yet.</td>
-                                </tr>
-                              )}
-                            </tbody>
-                          </table>
+                            {stateLabel === "disabled" ? "Enable Tenant" : "Disable Tenant"}
+                          </button>
+                          {profile.role === "super_admin" && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteTenant(t.id)}
+                              style={{ marginRight: 6 }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setExpandedTenantId((cur) => (cur === t.id ? null : t.id))}
+                          >
+                            {expandedTenantId === t.id ? "Hide History" : "History"}
+                          </button>
                         </td>
                       </tr>
-                    )}
-                  </Fragment>
-                ))}
-                {tenants.length === 0 && (
+                      {expandedTenantId === t.id && (
+                        <tr>
+                          <td colSpan="6" style={{ background: "#f8fafc" }}>
+                            <strong>
+                              License Blocks & History (ID #{t.numeric_id} — <code>{t.id}</code>)
+                            </strong>
+                            <table
+                              border="1"
+                              cellPadding="6"
+                              style={{ width: "100%", borderCollapse: "collapse", marginTop: 8, fontSize: 12 }}
+                            >
+                              <thead>
+                                <tr>
+                                  <th>Seats</th>
+                                  <th>Period Status</th>
+                                  <th>Start Date</th>
+                                  <th>End Date</th>
+                                  <th>Changed By ID</th>
+                                  <th>Reason</th>
+                                  <th>Block Action</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(t.license_periods || []).map((lp) => (
+                                  <tr key={lp.id}>
+                                    <td>+{lp.seat_count}</td>
+                                    <td>{lp.is_active_now ? "Active Now" : "Ended / Scheduled"}</td>
+                                    <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
+                                    <td>
+                                      {lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Open-ended"}
+                                    </td>
+                                    <td>
+                                      <code>{lp.changed_by || "-"}</code>{" "}
+                                      {lp.changed_by_name ? `(${lp.changed_by_name})` : ""}
+                                    </td>
+                                    <td>{lp.reason || "-"}</td>
+                                    <td>
+                                      {lp.is_active_now ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleEndSeatBlock(t.id, lp.id)}
+                                        >
+                                          End Now
+                                        </button>
+                                      ) : (
+                                        "-"
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                                {(!t.license_periods || t.license_periods.length === 0) && (
+                                  <tr>
+                                    <td colSpan="7">No license blocks recorded yet.</td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+                {filteredTenants.length === 0 && (
                   <tr>
-                    <td colSpan="5">No tenants created yet.</td>
+                    <td colSpan="6">No tenants match your current filter.</td>
                   </tr>
                 )}
               </tbody>
