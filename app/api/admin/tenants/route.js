@@ -24,11 +24,9 @@ export async function computeActiveSeats(supabase, tenantId) {
   }
 
   const nowMs = Date.now();
-  const activeSum = periods
+  return periods
     .filter((p) => isPeriodActiveAt(p, nowMs))
     .reduce((sum, p) => sum + Math.max(0, Number(p.seat_count || 0)), 0);
-
-  return activeSum;
 }
 
 export async function GET(req) {
@@ -44,7 +42,7 @@ export async function GET(req) {
 
     const [{ data: tenants, error: tErr }, { data: profiles, error: pErr }, { data: periods, error: lpErr }] =
       await Promise.all([
-        supabase.from("tenants").select("*").order("created_at", { ascending: false }),
+        supabase.from("tenants").select("*").order("created_at", { ascending: true }),
         supabase.from("profiles").select("id, tenant_id, full_name, email, role, is_active"),
         supabase
           .from("license_periods")
@@ -58,7 +56,8 @@ export async function GET(req) {
     const nowMs = Date.now();
     const profileMap = new Map((profiles || []).map((pr) => [pr.id, pr]));
 
-    const enriched = (tenants || []).map((t) => {
+    const enriched = (tenants || []).map((t, index) => {
+      const numericId = t.tenant_no ?? t.numeric_id ?? index + 1;
       const members = (profiles || []).filter((p) => p.tenant_id === t.id);
       const activeUsersCount = members.filter((p) => p.is_active).length;
 
@@ -84,21 +83,27 @@ export async function GET(req) {
               .reduce((sum, h) => sum + Math.max(0, Number(h.seat_count || 0)), 0)
           : Number(t.max_licenses || 0);
 
-      const overCapacity = Math.max(0, activeUsersCount - activeSeats);
+      const licenseExpired = history.length > 0 && activeSeats <= 0;
+      const effectiveState =
+        t.status === "disabled" || licenseExpired ? "disabled" : t.status || "active";
 
       return {
         ...t,
+        numeric_id: numericId,
         max_licenses: activeSeats,
         active_seats: activeSeats,
         used_licenses: activeUsersCount,
         remaining_licenses: Math.max(0, activeSeats - activeUsersCount),
-        over_capacity: overCapacity,
+        over_capacity: Math.max(0, activeUsersCount - activeSeats),
+        license_expired: licenseExpired,
+        effective_state: effectiveState,
         users: members,
         license_periods: history,
       };
     });
 
-    return NextResponse.json({ tenants: enriched });
+    // Show newest first while keeping consistent numeric IDs (1, 2, 3...)
+    return NextResponse.json({ tenants: enriched.reverse() });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -237,7 +242,21 @@ export async function PATCH(req) {
       return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
     }
 
-    // Option A: End an existing seat block early
+    // Explicit enable/disable tenant status
+    if (action === "set_status") {
+      const nextStatus = body.status === "disabled" ? "disabled" : "active";
+      const { data: updatedTenant, error: stErr } = await supabase
+        .from("tenants")
+        .update({ status: nextStatus })
+        .eq("id", tenantId)
+        .select()
+        .single();
+
+      if (stErr) return NextResponse.json({ error: stErr.message }, { status: 400 });
+      return NextResponse.json({ ok: true, tenant: updatedTenant, changed_by: caller.profile.id });
+    }
+
+    // End an existing seat block early
     if (action === "end_block") {
       if (!body.period_id) {
         return NextResponse.json({ error: "period_id is required to end a block" }, { status: 400 });
@@ -252,12 +271,22 @@ export async function PATCH(req) {
       if (updErr) return NextResponse.json({ error: updErr.message }, { status: 400 });
 
       const activeSeats = await computeActiveSeats(supabase, tenantId);
-      await supabase.from("tenants").update({ max_licenses: activeSeats }).eq("id", tenantId);
+      const nextStatus = activeSeats <= 0 ? "disabled" : "active";
 
-      return NextResponse.json({ ok: true, active_seats: activeSeats, changed_by: caller.profile.id });
+      await supabase
+        .from("tenants")
+        .update({ max_licenses: activeSeats, status: nextStatus })
+        .eq("id", tenantId);
+
+      return NextResponse.json({
+        ok: true,
+        active_seats: activeSeats,
+        status: nextStatus,
+        changed_by: caller.profile.id,
+      });
     }
 
-    // Option B: Add a new time-bound seat block (e.g. +3 seats for 1 month, +2 seats for 6 months)
+    // Add a new time-bound seat block
     const seatCount = Number(body.seat_count ?? body.max_licenses);
     if (Number.isNaN(seatCount) || seatCount <= 0) {
       return NextResponse.json(
@@ -294,12 +323,13 @@ export async function PATCH(req) {
     if (lpErr) return NextResponse.json({ error: lpErr.message }, { status: 400 });
 
     const activeSeats = await computeActiveSeats(supabase, tenantId);
+    const nextStatus = activeSeats > 0 ? "active" : "disabled";
 
     const { data: updatedTenant, error: tErr } = await supabase
       .from("tenants")
       .update({
         max_licenses: activeSeats,
-        ...(body.status ? { status: body.status } : {}),
+        status: body.status || nextStatus,
       })
       .eq("id", tenantId)
       .select()
