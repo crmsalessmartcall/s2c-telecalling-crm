@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
 
-function isPeriodActiveAt(period, nowMs = Date.now()) {
+export function getLicensePeriodState(period, nowMs = Date.now()) {
   const startMs = period.starts_at ? new Date(period.starts_at).getTime() : -Infinity;
   const endMs = period.ends_at ? new Date(period.ends_at).getTime() : Infinity;
-  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return false;
-  return startMs <= nowMs && nowMs < endMs;
+
+  if (!Number.isNaN(endMs) && endMs <= nowMs) {
+    return { state: "expired", label: "Expired", isActiveNow: false };
+  }
+  if (!Number.isNaN(startMs) && startMs > nowMs) {
+    return { state: "upcoming", label: "Upcoming", isActiveNow: false };
+  }
+  return { state: "active", label: "Active Now", isActiveNow: true };
 }
 
 export async function computeActiveSeats(supabase, tenantId) {
@@ -25,7 +31,7 @@ export async function computeActiveSeats(supabase, tenantId) {
 
   const nowMs = Date.now();
   return periods
-    .filter((p) => isPeriodActiveAt(p, nowMs))
+    .filter((p) => getLicensePeriodState(p, nowMs).isActiveNow)
     .reduce((sum, p) => sum + Math.max(0, Number(p.seat_count || 0)), 0);
 }
 
@@ -67,10 +73,12 @@ export async function GET(req) {
             .filter((lp) => lp.tenant_id === t.id)
             .map((lp) => {
               const actor = profileMap.get(lp.changed_by);
-              const isActiveNow = isPeriodActiveAt(lp, nowMs);
+              const statusInfo = getLicensePeriodState(lp, nowMs);
               return {
                 ...lp,
-                is_active_now: isActiveNow,
+                period_state: statusInfo.state,
+                period_label: statusInfo.label,
+                is_active_now: statusInfo.isActiveNow,
                 changed_by_name: actor?.full_name || null,
                 changed_by_email: actor?.email || null,
               };
@@ -102,7 +110,6 @@ export async function GET(req) {
       };
     });
 
-    // Show newest first while keeping consistent numeric IDs (1, 2, 3...)
     return NextResponse.json({ tenants: enriched.reverse() });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -242,7 +249,6 @@ export async function PATCH(req) {
       return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
     }
 
-    // Explicit enable/disable tenant status
     if (action === "set_status") {
       const nextStatus = body.status === "disabled" ? "disabled" : "active";
       const { data: updatedTenant, error: stErr } = await supabase
@@ -256,7 +262,6 @@ export async function PATCH(req) {
       return NextResponse.json({ ok: true, tenant: updatedTenant, changed_by: caller.profile.id });
     }
 
-    // End an existing seat block early
     if (action === "end_block") {
       if (!body.period_id) {
         return NextResponse.json({ error: "period_id is required to end a block" }, { status: 400 });
@@ -286,7 +291,6 @@ export async function PATCH(req) {
       });
     }
 
-    // Add a new time-bound seat block
     const seatCount = Number(body.seat_count ?? body.max_licenses);
     if (Number.isNaN(seatCount) || seatCount <= 0) {
       return NextResponse.json(
