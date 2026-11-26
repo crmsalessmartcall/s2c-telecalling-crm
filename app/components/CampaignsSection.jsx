@@ -581,4 +581,274 @@ export default function CampaignsSection({
                     key={cf.id}
                     placeholder={`${cf.label} (${cf.field_key})`}
                     value={leadForm.custom_fields[cf.field_key] || ""}
-                    onChange
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setLeadForm((f) => ({
+                        ...f,
+                        custom_fields: { ...f.custom_fields, [cf.field_key]: val },
+                      }));
+                    }}
+                  />
+                ))}
+                <button type="submit">Add Lead</button>
+              </form>
+            </div>
+
+            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 8,
+                }}
+              >
+                <h4 style={{ margin: 0 }}>Bulk CSV Upload & Mapping</h4>
+                <button
+                  type="button"
+                  onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
+                >
+                  Download Sample CSV
+                </button>
+              </div>
+              <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
+
+              {csvHeaders.length > 0 && (
+                <form onSubmit={handleImportMappedCsv} style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, fontWeight: "bold" }}>
+                    Map CSV Columns ({csvRawRows.length} rows ready):
+                  </div>
+                  {csvHeaders.map((h) => {
+                    const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
+                    return (
+                      <div key={h} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                        <code style={{ minWidth: 90 }}>{h}</code>
+                        <select
+                          value={entry.target}
+                          onChange={(e) =>
+                            setColumnMapping((prev) => ({
+                              ...prev,
+                              [h]: { ...entry, target: e.target.value },
+                            }))
+                          }
+                        >
+                          <option value="std:name">Name</option>
+                          <option value="std:phone">Phone</option>
+                          <option value="std:email">Email</option>
+                          <option value="std:notes">Notes</option>
+                          <option value="std:follow_up_at">Follow-Up</option>
+                          {callFields.map((cf) => (
+                            <option key={cf.id} value={`custom:${cf.field_key}`}>
+                              Project Field: {cf.label} ({cf.field_key})
+                            </option>
+                          ))}
+                          <option value="new_field">+ Create New Project Field</option>
+                          <option value="ignore">Ignore</option>
+                        </select>
+                        {entry.target === "new_field" && (
+                          <input
+                            placeholder="New field name"
+                            value={entry.newFieldName}
+                            onChange={(e) =>
+                              setColumnMapping((prev) => ({
+                                ...prev,
+                                [h]: { ...entry, newFieldName: e.target.value },
+                              }))
+                            }
+                            style={{ width: 120 }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button type="submit" style={{ fontWeight: "bold", marginTop: 4 }}>
+                    Import Mapped Leads
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: 10,
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              background: "#f8fafc",
+              marginBottom: 12,
+              display: "grid",
+              gap: 8,
+            }}
+          >
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <select
+                value={filters.status}
+                onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+              >
+                <option value="all">All Statuses</option>
+                <option value="new">new</option>
+                <option value="contacted">contacted</option>
+                <option value="follow_up">follow_up</option>
+                <option value="converted">converted</option>
+                <option value="closed">closed</option>
+              </select>
+
+              <select
+                value={filters.callKind}
+                onChange={(e) => setFilters((f) => ({ ...f, callKind: e.target.value }))}
+              >
+                <option value="all">All Leads</option>
+                <option value="fresh">Only Fresh Call</option>
+                <option value="followup">Only Follow-Up Call</option>
+                <option value="fresh_and_followup">Fresh & Follow-Up Call</option>
+              </select>
+
+              <select
+                value={filters.disposition}
+                onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+              >
+                <option value="all">All Dispositions</option>
+                <option value="__none__">No Disposition</option>
+                {dispositions.map((d) => (
+                  <option key={d.id} value={d.name}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={filters.paramKey}
+                onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
+              >
+                <option value="">Parameter Filter</option>
+                {paramOptions.map((po) => (
+                  <option key={po.key} value={po.key}>
+                    {po.label}
+                  </option>
+                ))}
+              </select>
+
+              <input
+                placeholder="Parameter value"
+                value={filters.paramValue}
+                onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
+                style={{ width: 140 }}
+              />
+
+              <input
+                placeholder="Search name / phone..."
+                value={filters.search}
+                onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+                style={{ width: 170 }}
+              />
+            </div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 12, fontWeight: "bold" }}>
+                Bulk ({filteredLeads.length} filtered):
+              </span>
+              <input
+                type="datetime-local"
+                value={bulkFollowUpAt}
+                onChange={(e) => setBulkFollowUpAt(e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={handleBulkSetFollowUp}
+                disabled={!bulkFollowUpAt || filteredLeads.length === 0}
+              >
+                Bulk Set Follow-Up
+              </button>
+              <button
+                type="button"
+                onClick={handleBulkDeleteFiltered}
+                disabled={filteredLeads.length === 0}
+                style={{ color: "#991b1b" }}
+              >
+                Delete Filtered
+              </button>
+            </div>
+          </div>
+
+          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th>Customer</th>
+                <th>Phone</th>
+                <th>Parameters</th>
+                <th>Status</th>
+                <th>Last Disposition</th>
+                <th>Follow-Up</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredLeads.map((l) => {
+                const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
+                const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
+                return (
+                  <tr key={l.id}>
+                    <td>
+                      <strong>{l.name}</strong>
+                      {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
+                    </td>
+                    <td>{l.phone}</td>
+                    <td>
+                      {entries.length > 0
+                        ? entries.map(([k, v]) => (
+                            <div key={k} style={{ fontSize: 12 }}>
+                              <code>{k}</code>: <strong>{String(v)}</strong>
+                            </div>
+                          ))
+                        : "-"}
+                    </td>
+                    <td>
+                      <select
+                        value={l.status || "new"}
+                        onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
+                      >
+                        <option value="new">new</option>
+                        <option value="contacted">contacted</option>
+                        <option value="follow_up">follow_up</option>
+                        <option value="converted">converted</option>
+                        <option value="closed">closed</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={l.disposition || ""}
+                        onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
+                      >
+                        <option value="">-- None --</option>
+                        {dispositions.map((d) => (
+                          <option key={d.id} value={d.name}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        type="datetime-local"
+                        value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
+                        onChange={(e) =>
+                          handleUpdateLead(l.id, {
+                            follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
+                          })
+                        }
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+              {filteredLeads.length === 0 && (
+                <tr>
+                  <td colSpan="6">No leads match the selected filters.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
