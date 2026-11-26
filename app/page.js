@@ -64,6 +64,10 @@ export default function HomePage() {
 
   // Point 3: Tenant Admin Team & Licenses state
   const [teamUsers, setTeamUsers] = useState([]);
+  const [tenantLicenseHistory, setTenantLicenseHistory] = useState([]);
+  const [showAddUserForm, setShowAddUserForm] = useState(false);
+  const [resetPasswordUserId, setResetPasswordUserId] = useState(null);
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
   const [licenseInfo, setLicenseInfo] = useState({ used: 0, max: 0, remaining: 0, overCapacity: 0 });
   const [newUserForm, setNewUserForm] = useState({
     full_name: "",
@@ -153,6 +157,7 @@ export default function HomePage() {
         const activeSeats = uRes.data.active_seats ?? uRes.data.tenant?.max_licenses ?? 0;
         const used = uRes.data.used_licenses ?? 0;
         setTeamUsers(uRes.data.users || []);
+        setTenantLicenseHistory(uRes.data.license_periods || []);
         setLicenseInfo({
           used,
           max: activeSeats,
@@ -469,8 +474,37 @@ export default function HomePage() {
     }
 
     setNewUserForm({ full_name: "", email: "", password: "", role: "agent" });
-    setStatusMessage(`Added user "${res.data.user?.full_name || res.data.user?.email}".`);
+    setShowAddUserForm(false);
+    setStatusMessage(`Added user "${res.data.user?.full_name || res.data.user?.email}" with password set.`);
     await loadRoleData(session, profile);
+  }
+
+  async function handleResetUserPassword(e, targetUser) {
+    e.preventDefault();
+    if (!session?.access_token || !resetPasswordValue) return;
+    setStatusMessage("");
+
+    const res = await safeJsonFetch("/api/tenant/users", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        action: "reset_password",
+        user_id: targetUser.id,
+        password: resetPasswordValue,
+      }),
+    });
+
+    if (!res.ok) {
+      setStatusMessage(res.data.error || "Failed to reset password.");
+      return;
+    }
+
+    setResetPasswordUserId(null);
+    setResetPasswordValue("");
+    setStatusMessage(`Password reset for ${targetUser.email}.`);
   }
 
   async function handleToggleUserActive(user) {
@@ -583,7 +617,7 @@ export default function HomePage() {
     }
 
     setFieldForm({ label: "", field_type: "text" });
-    setStatusMessage(`Added call field "${res.data.field?.label}".`);
+    setStatusMessage(`Added call field "${res.data.field?.label}" (key: ${res.data.field?.field_key}).`);
     await loadCampaignAndLeadsData(
       session.access_token,
       profile,
@@ -1166,10 +1200,28 @@ export default function HomePage() {
 
       {activeTab === "Team & Licenses" && profile.role === "tenant_admin" && (
         <section>
-          <h3>
-            Team & Licenses — {licenseInfo.used} / {licenseInfo.max} active seats used (
-            {licenseInfo.remaining} available)
-          </h3>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+              flexWrap: "wrap",
+              marginBottom: 14,
+            }}
+          >
+            <h3 style={{ margin: 0 }}>
+              Team & Licenses — {licenseInfo.used} / {licenseInfo.max} active seats used (
+              {licenseInfo.remaining} available)
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowAddUserForm((prev) => !prev)}
+              style={{ padding: "7px 12px", fontWeight: "bold", cursor: "pointer" }}
+            >
+              {showAddUserForm ? "Close Add Member" : "+ Add Team Member"}
+            </button>
+          </div>
 
           {licenseInfo.overCapacity > 0 && (
             <div
@@ -1188,44 +1240,50 @@ export default function HomePage() {
             </div>
           )}
 
-          <div style={{ marginBottom: 20, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-            <h4 style={{ marginTop: 0 }}>Add Team Member</h4>
-            <form onSubmit={handleAddTeamUser} style={{ display: "grid", gap: 8, maxWidth: 460 }}>
-              <input
-                placeholder="Full Name"
-                value={newUserForm.full_name}
-                onChange={(e) => setNewUserForm((f) => ({ ...f, full_name: e.target.value }))}
-                required
-              />
-              <input
-                type="email"
-                placeholder="Work Email"
-                value={newUserForm.email}
-                onChange={(e) => setNewUserForm((f) => ({ ...f, email: e.target.value }))}
-                required
-              />
-              <input
-                type="password"
-                placeholder="Temporary Password"
-                value={newUserForm.password}
-                onChange={(e) => setNewUserForm((f) => ({ ...f, password: e.target.value }))}
-                required
-              />
-              <select
-                value={newUserForm.role}
-                onChange={(e) => setNewUserForm((f) => ({ ...f, role: e.target.value }))}
-              >
-                <option value="agent">Agent</option>
-                <option value="team_leader">Team Leader</option>
-                <option value="supervisor">Supervisor</option>
-              </select>
-              <button type="submit" disabled={licenseInfo.remaining <= 0}>
-                {licenseInfo.remaining > 0 ? "Add User (Uses 1 Seat)" : "No Seats Available"}
-              </button>
-            </form>
-          </div>
+          {showAddUserForm && (
+            <div style={{ marginBottom: 20, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+              <h4 style={{ marginTop: 0 }}>Add Team Member & Set Password</h4>
+              <form onSubmit={handleAddTeamUser} style={{ display: "grid", gap: 8, maxWidth: 460 }}>
+                <input
+                  placeholder="Full Name"
+                  value={newUserForm.full_name}
+                  onChange={(e) => setNewUserForm((f) => ({ ...f, full_name: e.target.value }))}
+                  required
+                />
+                <input
+                  type="email"
+                  placeholder="Work Email"
+                  value={newUserForm.email}
+                  onChange={(e) => setNewUserForm((f) => ({ ...f, email: e.target.value }))}
+                  required
+                />
+                <input
+                  type="password"
+                  placeholder="Set Initial Password (min 6 chars)"
+                  value={newUserForm.password}
+                  onChange={(e) => setNewUserForm((f) => ({ ...f, password: e.target.value }))}
+                  required
+                />
+                <select
+                  value={newUserForm.role}
+                  onChange={(e) => setNewUserForm((f) => ({ ...f, role: e.target.value }))}
+                >
+                  <option value="agent">Agent</option>
+                  <option value="team_leader">Team Leader</option>
+                  <option value="supervisor">Supervisor</option>
+                </select>
+                <button type="submit" disabled={licenseInfo.remaining <= 0}>
+                  {licenseInfo.remaining > 0 ? "Create Member (Uses 1 Seat)" : "No Seats Available"}
+                </button>
+              </form>
+            </div>
+          )}
 
-          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
+          <table
+            border="1"
+            cellPadding="8"
+            style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24 }}
+          >
             <thead>
               <tr>
                 <th>Name</th>
@@ -1240,9 +1298,22 @@ export default function HomePage() {
                 <tr key={u.id}>
                   <td>{u.full_name}</td>
                   <td>{u.email}</td>
-                  <td><code>{u.role}</code></td>
+                  <td>
+                    <code>{u.role}</code>
+                  </td>
                   <td>{u.is_active ? "Active (1 seat)" : "Disabled (seat free)"}</td>
                   <td>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetPasswordUserId((cur) => (cur === u.id ? null : u.id));
+                        setResetPasswordValue("");
+                      }}
+                      style={{ marginRight: 6 }}
+                    >
+                      Reset Password
+                    </button>
+
                     {u.id !== profile.id && (
                       <>
                         <button
@@ -1257,10 +1328,65 @@ export default function HomePage() {
                         </button>
                       </>
                     )}
-                    {u.id === profile.id && <span>Current Admin</span>}
+
+                    {resetPasswordUserId === u.id && (
+                      <form
+                        onSubmit={(e) => handleResetUserPassword(e, u)}
+                        style={{ display: "flex", gap: 6, marginTop: 8 }}
+                      >
+                        <input
+                          type="password"
+                          placeholder="New password (min 6 chars)"
+                          value={resetPasswordValue}
+                          onChange={(e) => setResetPasswordValue(e.target.value)}
+                          required
+                          style={{ padding: 4 }}
+                        />
+                        <button type="submit">Save Password</button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResetPasswordUserId(null);
+                            setResetPasswordValue("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </form>
+                    )}
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+
+          {/* Tenant Admin License History */}
+          <h4>Your Tenant License History</h4>
+          <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr>
+                <th>Seats</th>
+                <th>Status</th>
+                <th>Start Date</th>
+                <th>End Date</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tenantLicenseHistory.map((lp) => (
+                <tr key={lp.id}>
+                  <td>+{lp.seat_count}</td>
+                  <td>{lp.is_active_now ? "Active Now" : "Ended / Scheduled"}</td>
+                  <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
+                  <td>{lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Open-ended"}</td>
+                  <td>{lp.reason || "-"}</td>
+                </tr>
+              ))}
+              {tenantLicenseHistory.length === 0 && (
+                <tr>
+                  <td colSpan="5">No license periods recorded for your tenant yet.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </section>
@@ -1344,7 +1470,6 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* Call Fields & Dispositions Config */}
           <div
             style={{
               display: "grid",
@@ -1377,7 +1502,7 @@ export default function HomePage() {
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
                 {callFields.map((cf) => (
                   <li key={cf.id}>
-                    {cf.label} <code>({cf.field_type})</code>
+                    {cf.label} <code>({cf.field_key || cf.field_type})</code>
                   </li>
                 ))}
                 {callFields.length === 0 && <li>No custom fields yet.</li>}
@@ -1387,7 +1512,10 @@ export default function HomePage() {
             <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
               <h4 style={{ marginTop: 0 }}>Dispositions ({dispositions.length})</h4>
               {["super_admin", "tenant_admin", "supervisor"].includes(profile.role) && (
-                <form onSubmit={handleAddDisposition} style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+                <form
+                  onSubmit={handleAddDisposition}
+                  style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}
+                >
                   <input
                     placeholder="Disposition (e.g. Interested)"
                     value={dispositionForm.name}
@@ -1418,7 +1546,6 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Add Lead + CSV Upload */}
           <div
             style={{
               display: "grid",
@@ -1474,7 +1601,6 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Leads Table */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <h4 style={{ margin: 0 }}>Leads ({filteredLeads.length})</h4>
             <input
@@ -1567,7 +1693,9 @@ export default function HomePage() {
             <tbody>
               {followupLeads.map((l) => (
                 <tr key={l.id}>
-                  <td><strong>{l.name}</strong></td>
+                  <td>
+                    <strong>{l.name}</strong>
+                  </td>
                   <td>{l.phone}</td>
                   <td>{l.follow_up_at ? new Date(l.follow_up_at).toLocaleString() : "-"}</td>
                   <td>{l.disposition || "-"}</td>
