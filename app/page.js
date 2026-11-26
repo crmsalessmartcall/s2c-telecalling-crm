@@ -13,6 +13,46 @@ const ROLE_ACCESS = {
   agent: ["Dialer", "Campaigns & Leads", "Follow-Ups"],
 };
 
+function LicensePeriodBadge({ period }) {
+  const nowMs = Date.now();
+  const startMs = period?.starts_at ? new Date(period.starts_at).getTime() : -Infinity;
+  const endMs = period?.ends_at ? new Date(period.ends_at).getTime() : Infinity;
+
+  const derivedState =
+    !Number.isNaN(endMs) && endMs <= nowMs
+      ? "expired"
+      : !Number.isNaN(startMs) && startMs > nowMs
+      ? "upcoming"
+      : "active";
+
+  const state = period?.period_state || derivedState;
+  const label =
+    period?.period_label ||
+    (state === "active" ? "Active Now" : state === "upcoming" ? "Upcoming" : "Expired");
+
+  const styles =
+    state === "active"
+      ? { background: "#dcfce7", color: "#166534", border: "1px solid #86efac" }
+      : state === "upcoming"
+      ? { background: "#dbeafe", color: "#1e40af", border: "1px solid #93c5fd" }
+      : { background: "#fee2e2", color: "#991b1b", border: "1px solid #fca5a5" };
+
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "2px 8px",
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: "bold",
+        ...styles,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 async function safeJsonFetch(url, options = {}) {
   const res = await fetch(url, options);
   const raw = await res.text();
@@ -37,7 +77,7 @@ export default function HomePage() {
   const [activeTab, setActiveTab] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
 
-  // Point 2: Tenants & License Blocks state
+  // Tenants & License Blocks state
   const [tenants, setTenants] = useState([]);
   const [expandedTenantId, setExpandedTenantId] = useState(null);
   const [showCreateTenant, setShowCreateTenant] = useState(false);
@@ -62,7 +102,7 @@ export default function HomePage() {
     reason: "1-month seat block",
   });
 
-  // Point 3: Tenant Admin Team & Licenses state
+  // Tenant Admin Team & Licenses state
   const [teamUsers, setTeamUsers] = useState([]);
   const [tenantLicenseHistory, setTenantLicenseHistory] = useState([]);
   const [showAddUserForm, setShowAddUserForm] = useState(false);
@@ -76,7 +116,7 @@ export default function HomePage() {
     role: "agent",
   });
 
-  // Point 4: Campaigns, Call Config, Leads & Follow-Ups state
+  // Campaigns, Call Config, Leads & Follow-Ups state
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [selectedTenantScope, setSelectedTenantScope] = useState("");
@@ -96,7 +136,9 @@ export default function HomePage() {
     notes: "",
     follow_up_at: "",
   });
-  const [csvText, setCsvText] = useState("name,phone,email,city\nRahul Sharma,9876543210,rahul@example.com,Mumbai");
+  const [csvText, setCsvText] = useState(
+    "name,phone,email,city\nRahul Sharma,9876543210,rahul@example.com,Mumbai"
+  );
 
   const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
 
@@ -559,7 +601,6 @@ export default function HomePage() {
     await loadRoleData(session, profile);
   }
 
-  // Point 4 Handlers
   async function handleCreateProject(e) {
     e.preventDefault();
     if (!session?.access_token) return;
@@ -1014,7 +1055,7 @@ export default function HomePage() {
                     />
                   </label>
                   <label style={{ fontSize: 12 }}>
-                    Custom Start Date/Time (optional):
+                    Custom Start Date/Time (optional—use a future date for Upcoming):
                     <input
                       type="datetime-local"
                       value={seatBlockForm.starts_at}
@@ -1139,7 +1180,7 @@ export default function HomePage() {
                               <thead>
                                 <tr>
                                   <th>Seats</th>
-                                  <th>Period Status</th>
+                                  <th>License Label</th>
                                   <th>Start Date</th>
                                   <th>End Date</th>
                                   <th>Changed By ID</th>
@@ -1151,7 +1192,9 @@ export default function HomePage() {
                                 {(t.license_periods || []).map((lp) => (
                                   <tr key={lp.id}>
                                     <td>+{lp.seat_count}</td>
-                                    <td>{lp.is_active_now ? "Active Now" : "Ended / Scheduled"}</td>
+                                    <td>
+                                      <LicensePeriodBadge period={lp} />
+                                    </td>
                                     <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
                                     <td>
                                       {lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Open-ended"}
@@ -1360,13 +1403,12 @@ export default function HomePage() {
             </tbody>
           </table>
 
-          {/* Tenant Admin License History */}
           <h4>Your Tenant License History</h4>
           <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr>
                 <th>Seats</th>
-                <th>Status</th>
+                <th>License Label</th>
                 <th>Start Date</th>
                 <th>End Date</th>
                 <th>Reason</th>
@@ -1376,7 +1418,9 @@ export default function HomePage() {
               {tenantLicenseHistory.map((lp) => (
                 <tr key={lp.id}>
                   <td>+{lp.seat_count}</td>
-                  <td>{lp.is_active_now ? "Active Now" : "Ended / Scheduled"}</td>
+                  <td>
+                    <LicensePeriodBadge period={lp} />
+                  </td>
                   <td>{lp.starts_at ? new Date(lp.starts_at).toLocaleString() : "-"}</td>
                   <td>{lp.ends_at ? new Date(lp.ends_at).toLocaleString() : "Open-ended"}</td>
                   <td>{lp.reason || "-"}</td>
