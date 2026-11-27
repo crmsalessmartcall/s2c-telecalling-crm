@@ -39,7 +39,7 @@ export default function CampaignsSection({
 }) {
   const [subTab, setSubTab] = useState(initialSubTab);
   const [campaignView, setCampaignView] = useState("prospects"); // "members" | "prospects" | "pending_calls"
-  const [ingestChannel, setIngestChannel] = useState("csv"); // "single" | "csv" | "email" | "api"
+  const [ingestChannel, setIngestChannel] = useState("csv"); // "single" | "csv" | "api"
 
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
   const [fieldForm, setFieldForm] = useState({ label: "", field_type: "text" });
@@ -66,12 +66,6 @@ export default function CampaignsSection({
 
   const [importSummary, setImportSummary] = useState(null);
   const [showErrorTable, setShowErrorTable] = useState(false);
-
-  const [emailLeadForm, setEmailLeadForm] = useState({
-    from: "",
-    subject: "",
-    body: "",
-  });
 
   const [apiTestPayload, setApiTestPayload] = useState(
     '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
@@ -343,28 +337,6 @@ export default function CampaignsSection({
     } finally {
       setImportingRows(false);
     }
-  }
-
-  async function handleEmailToLead(e) {
-    e.preventDefault();
-    const res = await safeJsonFetch("/api/leads/inbound-email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: selectedProjectId || null,
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        from: emailLeadForm.from,
-        subject: emailLeadForm.subject,
-        text: emailLeadForm.body,
-      }),
-    });
-    if (!res.ok) {
-      onNotify(res.data?.error || "Email-to-Lead failed.");
-      return;
-    }
-    setEmailLeadForm({ from: "", subject: "", body: "" });
-    onNotify(`Created Email lead "${res.data.lead?.name}" (${res.data.lead?.phone}).`);
-    await onReloadAll();
   }
 
   async function handleTestApiIngest(e) {
@@ -1001,17 +973,10 @@ export default function CampaignsSection({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setIngestChannel("email")}
-                        style={{ fontWeight: ingestChannel === "email" ? "bold" : "normal" }}
-                      >
-                        3. Email-to-Lead
-                      </button>
-                      <button
-                        type="button"
                         onClick={() => setIngestChannel("api")}
                         style={{ fontWeight: ingestChannel === "api" ? "bold" : "normal" }}
                       >
-                        4. API-to-Lead
+                        3. API-to-Lead
                       </button>
                     </div>
                   </div>
@@ -1206,35 +1171,6 @@ export default function CampaignsSection({
                     </div>
                   )}
 
-                  {ingestChannel === "email" && (
-                    <form onSubmit={handleEmailToLead} style={{ display: "grid", gap: 8, maxWidth: 560 }}>
-                      <div style={{ fontSize: 12, color: "#475569" }}>
-                        Inbound endpoint: <code>/api/leads/inbound-email</code> (accepts forwarded/parsed emails and tags source as <code>email</code>).
-                      </div>
-                      <input
-                        placeholder="Sender / From (e.g. Priya Nair <priya@example.com>)"
-                        value={emailLeadForm.from}
-                        onChange={(e) => setEmailLeadForm((f) => ({ ...f, from: e.target.value }))}
-                        required
-                      />
-                      <input
-                        placeholder="Subject (e.g. Inquiry for 9822011223)"
-                        value={emailLeadForm.subject}
-                        onChange={(e) => setEmailLeadForm((f) => ({ ...f, subject: e.target.value }))}
-                      />
-                      <textarea
-                        rows={3}
-                        placeholder="Email body containing phone number & inquiry details..."
-                        value={emailLeadForm.body}
-                        onChange={(e) => setEmailLeadForm((f) => ({ ...f, body: e.target.value }))}
-                        required
-                      />
-                      <button type="submit" style={{ width: "fit-content" }}>
-                        Parse & Create Email Lead
-                      </button>
-                    </form>
-                  )}
-
                   {ingestChannel === "api" && (
                     <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap: 8, maxWidth: 620 }}>
                       <div style={{ fontSize: 12, color: "#475569" }}>
@@ -1324,7 +1260,6 @@ export default function CampaignsSection({
                     <option value="all">All Sources</option>
                     <option value="manual">manual</option>
                     <option value="csv_import">csv_import</option>
-                    <option value="email">email</option>
                     <option value="api">api</option>
                   </select>
 
