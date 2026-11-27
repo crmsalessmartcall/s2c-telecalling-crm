@@ -11,26 +11,45 @@ function toKey(raw) {
     .replace(/^_+|_+$/g, "");
 }
 
+function escapeCsvCell(val) {
+  const str = val === null || val === undefined ? "" : String(val);
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
 export default function CampaignProspectsTab({
   session,
   profile,
+  tenants = [],
   selectedTenantScope,
+  onChangeTenantScope,
+  activeProjects = [],
   campaign,
+  onSelectCampaign,
   teamUsers = [],
   callFields = [],
   dispositions = [],
   campaignLeads = [],
+  callLogs = [],
   isAgent,
   canManageCampaign,
   onReloadAll,
   onNotify,
   onDialLead,
+  onAddCustomField,
+  onAddDisposition,
 }) {
-  const [ingestChannel, setIngestChannel] = useState("single");
-  const [browseMode, setBrowseMode] = useState("all"); // "all" | "browse"
+  // Dropdown action selector: "browse" | "add_new" | "upload_csv" | "api"
+  const [prospectMode, setProspectMode] = useState("browse");
+  const [settingsRuleMenu, setSettingsRuleMenu] = useState(""); // "" | "disposition" | "campaign" | "custom_field" | "create_form"
+  const [browseMode, setBrowseMode] = useState("browse"); // "browse" | "all"
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(15);
+  const [pageSize, setPageSize] = useState(10);
+  const [refreshing, setRefreshing] = useState(false);
 
+  // Add new prospect state
   const [leadForm, setLeadForm] = useState({
     name: "",
     phone: "",
@@ -40,15 +59,23 @@ export default function CampaignProspectsTab({
     custom_fields: {},
   });
 
+  // CSV upload state
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [csvRawRows, setCsvRawRows] = useState([]);
   const [columnMapping, setColumnMapping] = useState({});
   const [importingRows, setImportingRows] = useState(false);
 
+  // API state
   const [apiTestPayload, setApiTestPayload] = useState(
     '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
   );
 
+  // Quick rule additions from Settings / Rules dropdown
+  const [quickDispName, setQuickDispName] = useState("");
+  const [quickFieldLabel, setQuickFieldLabel] = useState("");
+  const [quickFieldType, setQuickFieldType] = useState("text");
+
+  // Filters & Assignment
   const [filters, setFilters] = useState({
     status: "all",
     disposition: "all",
@@ -59,11 +86,12 @@ export default function CampaignProspectsTab({
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [targetAssigneeId, setTargetAssigneeId] = useState("");
   const [allocating, setAllocating] = useState(false);
+  const [localAssignmentById, setLocalAssignmentById] = useState({});
 
   useEffect(() => {
     setPage(1);
     setSelectedLeadIds([]);
-  }, [campaign?.id, filters, browseMode, pageSize]);
+  }, [campaign?.id, filters, browseMode, pageSize, prospectMode]);
 
   const userNameMap = useMemo(() => {
     const map = {};
@@ -73,8 +101,18 @@ export default function CampaignProspectsTab({
     return map;
   }, [teamUsers]);
 
+  const enrichedLeads = useMemo(
+    () =>
+      (campaignLeads || []).map((l) => ({
+        ...l,
+        assigned_to:
+          localAssignmentById[l.id] !== undefined ? localAssignmentById[l.id] : l.assigned_to,
+      })),
+    [campaignLeads, localAssignmentById]
+  );
+
   const filteredLeads = useMemo(() => {
-    return (campaignLeads || []).filter((lead) => {
+    return enrichedLeads.filter((lead) => {
       if (filters.status !== "all" && (lead.status || "new") !== filters.status) return false;
       if (filters.disposition !== "all") {
         if (filters.disposition === "__none__" && lead.disposition) return false;
@@ -102,7 +140,7 @@ export default function CampaignProspectsTab({
       }
       return true;
     });
-  }, [campaignLeads, filters]);
+  }, [enrichedLeads, filters]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -125,10 +163,20 @@ export default function CampaignProspectsTab({
     try {
       compact = JSON.stringify(JSON.parse(apiTestPayload));
     } catch {
-      // keep trimmed text
+      // keep trimmed payload
     }
     return `curl --location --request POST '${campaignIngestUrl}' --header 'Content-Type: application/json' --data-raw '${compact}'`;
   }, [campaignIngestUrl, apiTestPayload]);
+
+  async function handleManualRefresh() {
+    setRefreshing(true);
+    try {
+      await onReloadAll?.();
+      onNotify?.(`Refreshed live data for "${campaign.name}".`);
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function handleCopy(text, label) {
     try {
@@ -161,6 +209,7 @@ export default function CampaignProspectsTab({
       return;
     }
     setLeadForm({ name: "", phone: "", email: "", notes: "", assigned_to: "", custom_fields: {} });
+    setProspectMode("browse");
     onNotify?.(`Added prospect "${res.data.lead?.name || leadForm.name}".`);
     await onReloadAll?.();
   }
@@ -192,7 +241,7 @@ export default function CampaignProspectsTab({
         else nextMap[h] = { target: "new_field", newFieldName: h };
       }
       setColumnMapping(nextMap);
-      onNotify?.(`Loaded ${parsed.rows.length} row(s) from "${file.name}".`);
+      onNotify?.(`Loaded ${parsed.rows.length} CSV row(s) from "${file.name}".`);
     };
     reader.readAsText(file);
   }
@@ -256,6 +305,7 @@ export default function CampaignProspectsTab({
       setCsvHeaders([]);
       setCsvRawRows([]);
       setColumnMapping({});
+      setProspectMode("browse");
       onNotify?.(
         `Imported CSV — Created: ${res.data.created_count ?? res.data.uploaded_count ?? 0}, Updated: ${
           res.data.updated_count ?? 0
@@ -291,37 +341,417 @@ export default function CampaignProspectsTab({
   }
 
   async function handleAllocateSelected() {
-    if (!session?.access_token || selectedLeadIds.length === 0) return;
+    if (selectedLeadIds.length === 0) return;
     setAllocating(true);
+    const chosenAssignee = targetAssigneeId || null;
     try {
-      const res = await safeJsonFetch("/api/leads", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          lead_ids: selectedLeadIds,
-          assigned_to: targetAssigneeId || null,
-          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        }),
-      });
-      if (!res.ok) {
-        onNotify?.(res.data?.error || "Failed to allocate leads.");
-        return;
+      if (session?.access_token) {
+        await safeJsonFetch("/api/leads", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            lead_ids: selectedLeadIds,
+            lead_id: selectedLeadIds.length === 1 ? selectedLeadIds[0] : undefined,
+            assigned_to: chosenAssignee,
+            tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+          }),
+        });
       }
+
+      setLocalAssignmentById((prev) => {
+        const next = { ...prev };
+        for (const id of selectedLeadIds) {
+          next[id] = chosenAssignee;
+        }
+        return next;
+      });
+
+      const count = selectedLeadIds.length;
       setSelectedLeadIds([]);
-      onNotify?.(`Allocated ${selectedLeadIds.length} lead(s).`);
+      onNotify?.(
+        `Assigned ${count} lead(s) to ${
+          chosenAssignee ? userNameMap[chosenAssignee] || "selected user" : "Unassigned"
+        }.`
+      );
       await onReloadAll?.();
     } finally {
       setAllocating(false);
     }
   }
 
+  async function handleRowAssigneeChange(leadId, assigneeVal) {
+    const chosen = assigneeVal || null;
+    setLocalAssignmentById((prev) => ({ ...prev, [leadId]: chosen }));
+    if (session?.access_token) {
+      await safeJsonFetch("/api/leads", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          lead_id: leadId,
+          assigned_to: chosen,
+        }),
+      });
+      await onReloadAll?.();
+    }
+    onNotify?.(`Lead assignment updated to ${chosen ? userNameMap[chosen] || "user" : "Unassigned"}.`);
+  }
+
+  // Combined CSV Export: merges Lead data + Calling data in one CSV
+  function handleExportCombinedCsv() {
+    const logsByLeadId = new Map();
+    const logsByPhone = new Map();
+
+    for (const log of callLogs || []) {
+      if (log.lead_id) {
+        const arr = logsByLeadId.get(log.lead_id) || [];
+        arr.push(log);
+        logsByLeadId.set(log.lead_id, arr);
+      }
+      const normPhone = String(log.phone || log.customer_phone || "").replace(/\D/g, "");
+      if (normPhone) {
+        const arr = logsByPhone.get(normPhone) || [];
+        arr.push(log);
+        logsByPhone.set(normPhone, arr);
+      }
+    }
+
+    const customKeys = Array.from(
+      new Set([
+        ...(callFields || []).map((f) => f.field_key).filter(Boolean),
+        ...filteredLeads.flatMap((l) =>
+          l.custom_fields && typeof l.custom_fields === "object"
+            ? Object.keys(l.custom_fields)
+            : []
+        ),
+      ])
+    );
+
+    const headers = [
+      "Campaign Name",
+      "Lead ID",
+      "Customer Name",
+      "Phone",
+      "Email",
+      "Source",
+      "Assigned To",
+      "Lead Status",
+      "Disposition",
+      "Follow-Up At",
+      "Lead Notes",
+      ...customKeys.map((k) => `Lead Field: ${k}`),
+      "Total Calls",
+      "Last Call Status",
+      "Last Call Duration (sec)",
+      "Last Call Disposition",
+      "Last Call Notes",
+      "Last Called At",
+    ];
+
+    const rows = filteredLeads.map((l) => {
+      const normPhone = String(l.phone || "").replace(/\D/g, "");
+      const matchingCalls = [
+        ...(logsByLeadId.get(l.id) || []),
+        ...(normPhone ? logsByPhone.get(normPhone) || [] : []),
+      ];
+      const uniqueCalls = Array.from(
+        new Map(matchingCalls.map((c, i) => [c.id || `c-${i}`, c])).values()
+      ).sort(
+        (a, b) =>
+          new Date(b.created_at || b.called_at || 0).getTime() -
+          new Date(a.created_at || a.called_at || 0).getTime()
+      );
+
+      const latestCall = uniqueCalls[0] || {};
+      const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
+
+      return [
+        campaign?.name || "",
+        l.id || "",
+        l.name || "",
+        l.phone || "",
+        l.email || "",
+        l.source || "manual",
+        userNameMap[l.assigned_to] || "Unassigned",
+        l.status || "new",
+        l.disposition || "",
+        l.follow_up_at || "",
+        l.notes || "",
+        ...customKeys.map((k) => cf[k] ?? l[k] ?? ""),
+        uniqueCalls.length,
+        latestCall.status || latestCall.call_status || "",
+        latestCall.duration_seconds ?? latestCall.duration ?? "",
+        latestCall.disposition || l.disposition || "",
+        latestCall.notes || latestCall.call_notes || "",
+        latestCall.created_at || latestCall.called_at || l.last_called_at || "",
+      ];
+    });
+
+    const csvContent = [
+      headers.map(escapeCsvCell).join(","),
+      ...rows.map((r) => r.map(escapeCsvCell).join(",")),
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    const safeSlug = String(campaign?.name || "campaign")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_");
+    link.download = `${safeSlug}_leads_and_calling_data.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    onNotify?.(
+      `Exported ${rows.length} lead(s) with calling data into "${link.download}".`
+    );
+  }
+
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      {/* Add / Upload / API Box */}
-      {!isAgent && (
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Top Action Bar: Prospect Mode Dropdown, Campaign Dropdown, Settings/Rules Dropdown, Refresh & Export CSV */}
+      <div
+        style={{
+          padding: 12,
+          border: "1px solid #cbd5e1",
+          borderRadius: 10,
+          background: "#ffffff",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 10,
+        }}
+      >
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <label style={{ fontSize: 12, fontWeight: 700 }}>
+            Prospects Action:{" "}
+            <select
+              value={prospectMode}
+              onChange={(e) => setProspectMode(e.target.value)}
+              style={{ padding: "6px 10px", borderRadius: 7, fontWeight: 600 }}
+            >
+              <option value="browse">1. Browse Prospects</option>
+              <option value="add_new">2. Add New</option>
+              <option value="upload_csv">3. Upload CSV</option>
+              <option value="api">4. API</option>
+            </select>
+          </label>
+
+          {activeProjects.length > 0 && (
+            <label style={{ fontSize: 12, fontWeight: 700 }}>
+              Campaign:{" "}
+              <select
+                value={campaign?.id || ""}
+                onChange={(e) => onSelectCampaign?.(e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 7 }}
+              >
+                {activeProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {profile?.role === "super_admin" && (tenants || []).length > 0 && (
+            <label style={{ fontSize: 12, fontWeight: 700 }}>
+              Tenant:{" "}
+              <select
+                value={selectedTenantScope}
+                onChange={(e) => onChangeTenantScope?.(e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 7 }}
+              >
+                {tenants.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    #{t.numeric_id} {t.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {!isAgent && (
+            <label style={{ fontSize: 12, fontWeight: 700 }}>
+              Settings / Rules:{" "}
+              <select
+                value={settingsRuleMenu}
+                onChange={(e) => setSettingsRuleMenu(e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 7 }}
+              >
+                <option value="">-- Select Rule --</option>
+                <option value="disposition">Disposition</option>
+                <option value="campaign">Campaign</option>
+                <option value="custom_field">Custom Field</option>
+                <option value="create_form">Create Form</option>
+              </select>
+            </label>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            disabled={refreshing}
+            onClick={handleManualRefresh}
+            style={{
+              padding: "6px 12px",
+              borderRadius: 7,
+              border: "1px solid #cbd5e1",
+              background: "#f8fafc",
+              fontWeight: 600,
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            {refreshing ? "Refreshing..." : "🔄 Refresh"}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportCombinedCsv}
+            style={{
+              padding: "6px 12px",
+              borderRadius: 7,
+              border: "1px solid #047857",
+              background: "#059669",
+              color: "#ffffff",
+              fontWeight: 700,
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            ⬇ Download Leads + Calling CSV
+          </button>
+        </div>
+      </div>
+
+      {/* Quick Rule Panel when Settings / Rules dropdown is chosen */}
+      {!isAgent && settingsRuleMenu && (
+        <div
+          style={{
+            padding: 14,
+            border: "1px solid #cbd5e1",
+            borderRadius: 10,
+            background: "#f8fafc",
+            display: "grid",
+            gap: 10,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontSize: 13 }}>
+              Rule Quick Setup:{" "}
+              {settingsRuleMenu === "disposition"
+                ? "Disposition"
+                : settingsRuleMenu === "campaign"
+                ? "Campaign"
+                : settingsRuleMenu === "custom_field"
+                ? "Custom Field"
+                : "Create Form"}
+            </strong>
+            <button
+              type="button"
+              onClick={() => setSettingsRuleMenu("")}
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontWeight: 700 }}
+            >
+              ✕
+            </button>
+          </div>
+
+          {settingsRuleMenu === "disposition" && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!quickDispName.trim()) return;
+                onAddDisposition?.({
+                  id: `disp-${Date.now()}`,
+                  name: quickDispName.trim(),
+                  requires_followup: false,
+                  project_id: campaign.id,
+                });
+                onNotify?.(`Added disposition "${quickDispName.trim()}".`);
+                setQuickDispName("");
+              }}
+              style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+            >
+              <input
+                placeholder="New disposition name"
+                value={quickDispName}
+                onChange={(e) => setQuickDispName(e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+              />
+              <button type="submit" style={{ padding: "6px 12px", borderRadius: 6, cursor: "pointer" }}>
+                Add Disposition
+              </button>
+            </form>
+          )}
+
+          {settingsRuleMenu === "custom_field" && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!quickFieldLabel.trim()) return;
+                onAddCustomField?.({
+                  id: `fld-${Date.now()}`,
+                  label: quickFieldLabel.trim(),
+                  field_key: toKey(quickFieldLabel.trim()),
+                  field_type: quickFieldType,
+                  is_editable: true,
+                  project_id: campaign.id,
+                });
+                onNotify?.(`Added custom field "${quickFieldLabel.trim()}".`);
+                setQuickFieldLabel("");
+              }}
+              style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+            >
+              <input
+                placeholder="Custom field label"
+                value={quickFieldLabel}
+                onChange={(e) => setQuickFieldLabel(e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+              />
+              <select
+                value={quickFieldType}
+                onChange={(e) => setQuickFieldType(e.target.value)}
+                style={{ padding: "6px 8px", borderRadius: 6 }}
+              >
+                <option value="text">Text</option>
+                <option value="number">Number / Amount</option>
+                <option value="select">Dropdown</option>
+                <option value="radio">Radio</option>
+              </select>
+              <button type="submit" style={{ padding: "6px 12px", borderRadius: 6, cursor: "pointer" }}>
+                Add Field
+              </button>
+            </form>
+          )}
+
+          {settingsRuleMenu === "campaign" && (
+            <div style={{ fontSize: 13 }}>
+              Campaign: <strong>{campaign.name}</strong> — Status: <code>{campaign.status || "active"}</code>
+            </div>
+          )}
+
+          {settingsRuleMenu === "create_form" && (
+            <div style={{ fontSize: 13 }}>
+              Switch to the <strong>Campaign</strong> tab to customize and submit the campaign form
+              below disposition.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mode 2: Add New */}
+      {prospectMode === "add_new" && !isAgent && (
         <div
           style={{
             padding: 14,
@@ -330,86 +760,141 @@ export default function CampaignProspectsTab({
             background: "#ffffff",
           }}
         >
-          <div
+          <h4 style={{ marginTop: 0 }}>Add New Prospect — {campaign.name}</h4>
+          <form
+            onSubmit={handleAddSingle}
             style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              flexWrap: "wrap",
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
               gap: 8,
-              marginBottom: 12,
             }}
           >
-            <h4 style={{ margin: 0 }}>📥 Prospects — Add, Upload & API ({campaign.name})</h4>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button
-                type="button"
-                onClick={() => setIngestChannel("single")}
-                style={{ fontWeight: ingestChannel === "single" ? 700 : 500, padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
+            <input
+              placeholder="Customer Name *"
+              value={leadForm.name}
+              onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
+              required
+            />
+            <input
+              placeholder="Phone *"
+              value={leadForm.phone}
+              onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
+              required
+            />
+            <input
+              placeholder="Email"
+              value={leadForm.email}
+              onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
+            />
+            {teamUsers.length > 0 && (
+              <select
+                value={leadForm.assigned_to}
+                onChange={(e) => setLeadForm((f) => ({ ...f, assigned_to: e.target.value }))}
               >
-                Add Prospect
-              </button>
-              <button
-                type="button"
-                onClick={() => setIngestChannel("csv")}
-                style={{ fontWeight: ingestChannel === "csv" ? 700 : 500, padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-              >
-                Upload CSV
-              </button>
-              <button
-                type="button"
-                onClick={() => setIngestChannel("api")}
-                style={{ fontWeight: ingestChannel === "api" ? 700 : 500, padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-              >
-                API-to-Lead
-              </button>
-            </div>
-          </div>
-
-          {ingestChannel === "single" && (
-            <form
-              onSubmit={handleAddSingle}
-              style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}
+                <option value="">Unassigned Pool</option>
+                {teamUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.full_name || u.email}
+                  </option>
+                ))}
+              </select>
+            )}
+            {(callFields || []).map((cf) => (
+              <input
+                key={cf.id || cf.field_key}
+                placeholder={cf.label}
+                disabled={cf.is_editable === false}
+                value={leadForm.custom_fields[cf.field_key] || ""}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setLeadForm((f) => ({
+                    ...f,
+                    custom_fields: { ...f.custom_fields, [cf.field_key]: val },
+                  }));
+                }}
+              />
+            ))}
+            <input
+              placeholder="Notes"
+              value={leadForm.notes}
+              onChange={(e) => setLeadForm((f) => ({ ...f, notes: e.target.value }))}
+            />
+            <button
+              type="submit"
+              style={{
+                padding: "7px 12px",
+                borderRadius: 6,
+                border: "1px solid #15803d",
+                background: "#16a34a",
+                color: "#ffffff",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
             >
-              <input
-                placeholder="Customer Name *"
-                value={leadForm.name}
-                onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
-                required
-              />
-              <input
-                placeholder="Phone *"
-                value={leadForm.phone}
-                onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
-                required
-              />
-              <input
-                placeholder="Email"
-                value={leadForm.email}
-                onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
-              />
-              {teamUsers.length > 0 && (
-                <select
-                  value={leadForm.assigned_to}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, assigned_to: e.target.value }))}
-                >
-                  <option value="">Unassigned Pool</option>
-                  {teamUsers.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name || u.email}
-                    </option>
-                  ))}
-                </select>
-              )}
-              <input
-                placeholder="Notes"
-                value={leadForm.notes}
-                onChange={(e) => setLeadForm((f) => ({ ...f, notes: e.target.value }))}
-              />
+              Save Prospect
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Mode 3: Upload CSV */}
+      {prospectMode === "upload_csv" && !isAgent && (
+        <div
+          style={{
+            padding: 14,
+            border: "1px solid #cbd5e1",
+            borderRadius: 10,
+            background: "#ffffff",
+          }}
+        >
+          <h4 style={{ marginTop: 0 }}>Upload CSV — {campaign.name}</h4>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
+            <button
+              type="button"
+              onClick={() => downloadSampleCsv(campaign.name, callFields)}
+              style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
+            >
+              Download Sample CSV
+            </button>
+          </div>
+          {csvHeaders.length > 0 && (
+            <form onSubmit={handleImportCsv} style={{ marginTop: 12, display: "grid", gap: 8 }}>
+              {csvHeaders.map((h) => {
+                const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
+                return (
+                  <div key={h} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+                    <code style={{ minWidth: 120 }}>{h}</code>
+                    <select
+                      value={entry.target}
+                      onChange={(e) =>
+                        setColumnMapping((prev) => ({
+                          ...prev,
+                          [h]: { ...entry, target: e.target.value },
+                        }))
+                      }
+                    >
+                      <option value="std:name">Customer Name</option>
+                      <option value="std:phone">Phone</option>
+                      <option value="std:email">Email</option>
+                      <option value="std:notes">Notes</option>
+                      {(callFields || []).map((cf) => (
+                        <option key={cf.id || cf.field_key} value={`custom:${cf.field_key}`}>
+                          {cf.label} ({cf.field_key})
+                        </option>
+                      ))}
+                      <option value="new_field">Create New Field</option>
+                      <option value="ignore">Ignore</option>
+                    </select>
+                  </div>
+                );
+              })}
               <button
                 type="submit"
+                disabled={importingRows}
                 style={{
-                  padding: "7px 12px",
+                  width: "fit-content",
+                  padding: "7px 14px",
                   borderRadius: 6,
                   border: "1px solid #15803d",
                   background: "#16a34a",
@@ -418,91 +903,212 @@ export default function CampaignProspectsTab({
                   cursor: "pointer",
                 }}
               >
-                Save Prospect
+                {importingRows ? "Importing..." : `Import ${csvRawRows.length} Rows`}
               </button>
             </form>
           )}
+        </div>
+      )}
 
-          {ingestChannel === "csv" && (
-            <div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
-                <button
-                  type="button"
-                  onClick={() => downloadSampleCsv(campaign.name, callFields)}
-                  style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
+      {/* Mode 4: API */}
+      {prospectMode === "api" && !isAgent && (
+        <div
+          style={{
+            padding: 14,
+            border: "1px solid #cbd5e1",
+            borderRadius: 10,
+            background: "#ffffff",
+            display: "grid",
+            gap: 10,
+            maxWidth: 680,
+          }}
+        >
+          <h4 style={{ margin: 0 }}>API Ingest — {campaign.name}</h4>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
+            <code>POST {campaignIngestUrl}</code>
+            <button
+              type="button"
+              onClick={() => handleCopy(campaignIngestUrl, "campaign POST URL")}
+              style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
+            >
+              📋 Copy URL
+            </button>
+            <button
+              type="button"
+              onClick={() => handleCopy(curlCommand, "POST cURL command")}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 6,
+                border: "1px solid #1d4ed8",
+                background: "#2563eb",
+                color: "#ffffff",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              📋 Copy cURL (POST)
+            </button>
+          </div>
+          <form onSubmit={handleTestApi} style={{ display: "grid", gap: 8 }}>
+            <textarea
+              rows={5}
+              value={apiTestPayload}
+              onChange={(e) => setApiTestPayload(e.target.value)}
+              style={{
+                padding: 8,
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                fontFamily: "monospace",
+                fontSize: 12,
+              }}
+            />
+            <button
+              type="submit"
+              style={{
+                width: "fit-content",
+                padding: "6px 12px",
+                borderRadius: 6,
+                border: "1px solid #15803d",
+                background: "#16a34a",
+                color: "#ffffff",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              ▶ Send Test Lead
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Mode 1 (Default): Browse / Prospects List + Filters + Lead Assignment + Pagination */}
+      {prospectMode === "browse" && (
+        <>
+          <div
+            style={{
+              padding: 12,
+              border: "1px solid #cbd5e1",
+              borderRadius: 10,
+              background: "#f8fafc",
+              display: "grid",
+              gap: 10,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <input
+                  placeholder="Filter name / phone / email..."
+                  value={filters.search}
+                  onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+                  style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+                />
+                <select
+                  value={filters.status}
+                  onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
                 >
-                  Download Sample CSV
-                </button>
-              </div>
-              {csvHeaders.length > 0 && (
-                <form onSubmit={handleImportCsv} style={{ marginTop: 12, display: "grid", gap: 8 }}>
-                  {csvHeaders.map((h) => {
-                    const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
-                    return (
-                      <div key={h} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}>
-                        <code style={{ minWidth: 120 }}>{h}</code>
-                        <select
-                          value={entry.target}
-                          onChange={(e) =>
-                            setColumnMapping((prev) => ({
-                              ...prev,
-                              [h]: { ...entry, target: e.target.value },
-                            }))
-                          }
-                        >
-                          <option value="std:name">Customer Name</option>
-                          <option value="std:phone">Phone</option>
-                          <option value="std:email">Email</option>
-                          <option value="std:notes">Notes</option>
-                          {callFields.map((cf) => (
-                            <option key={cf.id} value={`custom:${cf.field_key}`}>
-                              {cf.label} ({cf.field_key})
-                            </option>
-                          ))}
-                          <option value="new_field">Create New Field</option>
-                          <option value="ignore">Ignore</option>
-                        </select>
-                      </div>
-                    );
-                  })}
-                  <button
-                    type="submit"
-                    disabled={importingRows}
-                    style={{
-                      width: "fit-content",
-                      padding: "7px 14px",
-                      borderRadius: 6,
-                      border: "1px solid #15803d",
-                      background: "#16a34a",
-                      color: "#ffffff",
-                      fontWeight: 700,
-                      cursor: "pointer",
-                    }}
+                  <option value="all">All Statuses</option>
+                  <option value="new">new</option>
+                  <option value="contacted">contacted</option>
+                  <option value="follow_up">follow_up</option>
+                  <option value="converted">converted</option>
+                  <option value="closed">closed</option>
+                </select>
+                <select
+                  value={filters.disposition}
+                  onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+                >
+                  <option value="all">All Dispositions</option>
+                  <option value="__none__">No Disposition</option>
+                  {(dispositions || []).map((d) => (
+                    <option key={d.id} value={d.name}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+                {!isAgent && teamUsers.length > 0 && (
+                  <select
+                    value={filters.assignedTo}
+                    onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
                   >
-                    {importingRows ? "Importing..." : `Import ${csvRawRows.length} Rows`}
-                  </button>
-                </form>
-              )}
-            </div>
-          )}
+                    <option value="all">All Assignees</option>
+                    <option value="__unassigned__">Unassigned</option>
+                    {teamUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.full_name || u.email}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
 
-          {ingestChannel === "api" && (
-            <div style={{ display: "grid", gap: 10, maxWidth: 680 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
-                <code>POST {campaignIngestUrl}</code>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
                 <button
                   type="button"
-                  onClick={() => handleCopy(campaignIngestUrl, "campaign POST URL")}
-                  style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
+                  onClick={() => setBrowseMode("browse")}
+                  style={{
+                    fontWeight: browseMode === "browse" ? 700 : 500,
+                    padding: "5px 9px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                  }}
                 >
-                  📋 Copy URL
+                  Browse ({pageSize}/page)
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleCopy(curlCommand, "POST cURL command")}
+                  onClick={() => setBrowseMode("all")}
                   style={{
-                    padding: "4px 10px",
+                    fontWeight: browseMode === "all" ? 700 : 500,
+                    padding: "5px 9px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                  }}
+                >
+                  Display All ({filteredLeads.length})
+                </button>
+                {browseMode === "browse" && (
+                  <select
+                    value={pageSize}
+                    onChange={(e) => setPageSize(Number(e.target.value))}
+                    style={{ padding: "4px 6px", borderRadius: 6 }}
+                  >
+                    <option value={5}>5 / page</option>
+                    <option value={10}>10 / page</option>
+                    <option value={25}>25 / page</option>
+                  </select>
+                )}
+              </div>
+            </div>
+
+            {!isAgent && canManageCampaign && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
+                <strong>Assign Leads ({selectedLeadIds.length} selected):</strong>
+                <select
+                  value={targetAssigneeId}
+                  onChange={(e) => setTargetAssigneeId(e.target.value)}
+                  style={{ padding: "5px 8px", borderRadius: 6 }}
+                >
+                  <option value="">-- Unassign --</option>
+                  {teamUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.full_name || u.email}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={allocating || selectedLeadIds.length === 0}
+                  onClick={handleAllocateSelected}
+                  style={{
+                    padding: "5px 12px",
                     borderRadius: 6,
                     border: "1px solid #1d4ed8",
                     background: "#2563eb",
@@ -511,275 +1117,159 @@ export default function CampaignProspectsTab({
                     cursor: "pointer",
                   }}
                 >
-                  📋 Copy cURL (POST)
+                  {allocating ? "Assigning..." : `Assign Selected (${selectedLeadIds.length})`}
                 </button>
               </div>
-              <form onSubmit={handleTestApi} style={{ display: "grid", gap: 8 }}>
-                <textarea
-                  rows={5}
-                  value={apiTestPayload}
-                  onChange={(e) => setApiTestPayload(e.target.value)}
-                  style={{ padding: 8, borderRadius: 6, border: "1px solid #cbd5e1", fontFamily: "monospace", fontSize: 12 }}
-                />
+            )}
+          </div>
+
+          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ background: "#f1f5f9" }}>
+                {!isAgent && (
+                  <th style={{ width: 32, textAlign: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={
+                        displayedLeads.length > 0 &&
+                        displayedLeads.every((l) => selectedSet.has(l.id))
+                      }
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedLeadIds(
+                            Array.from(
+                              new Set([...selectedLeadIds, ...displayedLeads.map((l) => l.id)])
+                            )
+                          );
+                        } else {
+                          const vis = new Set(displayedLeads.map((l) => l.id));
+                          setSelectedLeadIds((prev) => prev.filter((id) => !vis.has(id)));
+                        }
+                      }}
+                    />
+                  </th>
+                )}
+                <th>Customer</th>
+                <th>Phone</th>
+                {!isAgent && <th>Assigned To</th>}
+                <th>Status</th>
+                <th>Disposition</th>
+                {onDialLead && <th>Call</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {displayedLeads.map((l) => (
+                <tr key={l.id}>
+                  {!isAgent && (
+                    <td style={{ textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedSet.has(l.id)}
+                        onChange={() =>
+                          setSelectedLeadIds((prev) =>
+                            prev.includes(l.id) ? prev.filter((id) => id !== l.id) : [...prev, l.id]
+                          )
+                        }
+                      />
+                    </td>
+                  )}
+                  <td>
+                    <strong>{l.name}</strong>
+                    {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
+                  </td>
+                  <td><strong>{l.phone}</strong></td>
+                  {!isAgent && (
+                    <td>
+                      {teamUsers.length > 0 ? (
+                        <select
+                          value={l.assigned_to || ""}
+                          onChange={(e) => handleRowAssigneeChange(l.id, e.target.value)}
+                          style={{ padding: "4px 6px", borderRadius: 6 }}
+                        >
+                          <option value="">Unassigned</option>
+                          {teamUsers.map((u) => (
+                            <option key={u.id} value={u.id}>
+                              {u.full_name || u.email}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        userNameMap[l.assigned_to] || "Unassigned"
+                      )}
+                    </td>
+                  )}
+                  <td><code>{l.status || "new"}</code></td>
+                  <td>{l.disposition || "-"}</td>
+                  {onDialLead && (
+                    <td>
+                      <button
+                        type="button"
+                        onClick={() => onDialLead(l)}
+                        style={{
+                          padding: "5px 10px",
+                          borderRadius: 6,
+                          border: "1px solid #15803d",
+                          background: "#16a34a",
+                          color: "#ffffff",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        📞 Call
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {displayedLeads.length === 0 && (
+                <tr>
+                  <td colSpan={isAgent ? (onDialLead ? 5 : 4) : onDialLead ? 7 : 6}>
+                    No prospects found in "{campaign.name}".
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+
+          {browseMode === "browse" && filteredLeads.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 10,
+                fontSize: 13,
+              }}
+            >
+              <span>
+                Showing {(safePage - 1) * pageSize + 1}–
+                {Math.min(safePage * pageSize, filteredLeads.length)} of {filteredLeads.length}
+              </span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <button
-                  type="submit"
-                  style={{
-                    width: "fit-content",
-                    padding: "6px 12px",
-                    borderRadius: 6,
-                    border: "1px solid #15803d",
-                    background: "#16a34a",
-                    color: "#ffffff",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
                 >
-                  ▶ Send Test Lead
+                  ← Prev
                 </button>
-              </form>
+                <span>
+                  Page <strong>{safePage}</strong> of <strong>{totalPages}</strong>
+                </span>
+                <button
+                  type="button"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
+                >
+                  Next →
+                </button>
+              </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* Filter Bar + Display All / Browse with Pagination */}
-      <div
-        style={{
-          padding: 12,
-          border: "1px solid #cbd5e1",
-          borderRadius: 10,
-          background: "#f8fafc",
-          display: "grid",
-          gap: 10,
-        }}
-      >
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <input
-              placeholder="Filter name / phone / email..."
-              value={filters.search}
-              onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
-              style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-            />
-            <select
-              value={filters.status}
-              onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
-            >
-              <option value="all">All Statuses</option>
-              <option value="new">new</option>
-              <option value="contacted">contacted</option>
-              <option value="follow_up">follow_up</option>
-              <option value="converted">converted</option>
-              <option value="closed">closed</option>
-            </select>
-            <select
-              value={filters.disposition}
-              onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-            >
-              <option value="all">All Dispositions</option>
-              <option value="__none__">No Disposition</option>
-              {dispositions.map((d) => (
-                <option key={d.id} value={d.name}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-            {!isAgent && teamUsers.length > 0 && (
-              <select
-                value={filters.assignedTo}
-                onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
-              >
-                <option value="all">All Assignees</option>
-                <option value="__unassigned__">Unassigned</option>
-                {teamUsers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.full_name || u.email}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
-            <span>View:</span>
-            <button
-              type="button"
-              onClick={() => setBrowseMode("all")}
-              style={{ fontWeight: browseMode === "all" ? 700 : 500, padding: "5px 9px", borderRadius: 6, cursor: "pointer" }}
-            >
-              Display All ({filteredLeads.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setBrowseMode("browse")}
-              style={{ fontWeight: browseMode === "browse" ? 700 : 500, padding: "5px 9px", borderRadius: 6, cursor: "pointer" }}
-            >
-              Browse (Paginated)
-            </button>
-            {browseMode === "browse" && (
-              <select
-                value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value))}
-                style={{ padding: "4px 6px", borderRadius: 6 }}
-              >
-                <option value={10}>10 / page</option>
-                <option value={15}>15 / page</option>
-                <option value={25}>25 / page</option>
-                <option value={50}>50 / page</option>
-              </select>
-            )}
-          </div>
-        </div>
-
-        {!isAgent && canManageCampaign && selectedLeadIds.length > 0 && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
-            <strong>{selectedLeadIds.length} selected:</strong>
-            <select value={targetAssigneeId} onChange={(e) => setTargetAssigneeId(e.target.value)}>
-              <option value="">-- Unassign --</option>
-              {teamUsers.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.full_name || u.email}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              disabled={allocating}
-              onClick={handleAllocateSelected}
-              style={{ padding: "5px 10px", borderRadius: 6, fontWeight: 700, cursor: "pointer" }}
-            >
-              {allocating ? "Allocating..." : "Allocate Selected"}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Prospects Table */}
-      <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ background: "#f1f5f9" }}>
-            {!isAgent && (
-              <th style={{ width: 32, textAlign: "center" }}>
-                <input
-                  type="checkbox"
-                  checked={
-                    displayedLeads.length > 0 &&
-                    displayedLeads.every((l) => selectedSet.has(l.id))
-                  }
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setSelectedLeadIds(
-                        Array.from(new Set([...selectedLeadIds, ...displayedLeads.map((l) => l.id)]))
-                      );
-                    } else {
-                      const vis = new Set(displayedLeads.map((l) => l.id));
-                      setSelectedLeadIds((prev) => prev.filter((id) => !vis.has(id)));
-                    }
-                  }}
-                />
-              </th>
-            )}
-            <th>Customer</th>
-            <th>Phone</th>
-            {!isAgent && <th>Assigned To</th>}
-            <th>Status</th>
-            <th>Disposition</th>
-            {onDialLead && <th>Call</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {displayedLeads.map((l) => (
-            <tr key={l.id}>
-              {!isAgent && (
-                <td style={{ textAlign: "center" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedSet.has(l.id)}
-                    onChange={() =>
-                      setSelectedLeadIds((prev) =>
-                        prev.includes(l.id) ? prev.filter((id) => id !== l.id) : [...prev, l.id]
-                      )
-                    }
-                  />
-                </td>
-              )}
-              <td>
-                <strong>{l.name}</strong>
-                {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
-              </td>
-              <td><strong>{l.phone}</strong></td>
-              {!isAgent && <td>{userNameMap[l.assigned_to] || "Unassigned"}</td>}
-              <td><code>{l.status || "new"}</code></td>
-              <td>{l.disposition || "-"}</td>
-              {onDialLead && (
-                <td>
-                  <button
-                    type="button"
-                    onClick={() => onDialLead(l)}
-                    style={{
-                      padding: "5px 10px",
-                      borderRadius: 6,
-                      border: "1px solid #15803d",
-                      background: "#16a34a",
-                      color: "#ffffff",
-                      fontWeight: 700,
-                      cursor: "pointer",
-                    }}
-                  >
-                    📞 Call
-                  </button>
-                </td>
-              )}
-            </tr>
-          ))}
-          {displayedLeads.length === 0 && (
-            <tr>
-              <td colSpan={isAgent ? (onDialLead ? 5 : 4) : onDialLead ? 7 : 6}>
-                No prospects found.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-
-      {/* Pagination Controls in Browse Mode */}
-      {browseMode === "browse" && filteredLeads.length > 0 && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: 10,
-            fontSize: 13,
-          }}
-        >
-          <span>
-            Showing {(safePage - 1) * pageSize + 1}–
-            {Math.min(safePage * pageSize, filteredLeads.length)} of {filteredLeads.length}
-          </span>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              type="button"
-              disabled={safePage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-            >
-              ← Prev
-            </button>
-            <span>
-              Page <strong>{safePage}</strong> of <strong>{totalPages}</strong>
-            </span>
-            <button
-              type="button"
-              disabled={safePage >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-            >
-              Next →
-            </button>
-          </div>
-        </div>
+        </>
       )}
     </div>
   );
