@@ -6,9 +6,18 @@ import {
   normalizeFieldKey,
 } from "@/lib/ingestHelpers";
 
+const DEFAULT_SUPABASE_URL = "https://yabrgtrerjyzahmswbzw.supabase.co";
+
 function getSupabaseServer() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const url =
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    DEFAULT_SUPABASE_URL;
+  const key =
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
   if (!url || !key) return null;
   return createClient(url, key, { auth: { persistSession: false } });
 }
@@ -70,7 +79,6 @@ export async function POST(req) {
       return NextResponse.json({ error: "No rows provided for import." }, { status: 400 });
     }
 
-    // 1. Create any new campaign/call fields requested via inline "Other" mapping
     let createdFieldsCount = 0;
     const newFields = Array.isArray(body?.new_fields) ? body.new_fields : [];
     for (const nf of newFields) {
@@ -92,7 +100,6 @@ export async function POST(req) {
       }
     }
 
-    // 2. Load existing leads in campaign/tenant for same-campaign phone deduplication
     let existingQuery = supabase.from("leads").select("id, name, phone, email, notes, custom_fields, project_id");
     if (projectId) {
       existingQuery = existingQuery.eq("project_id", projectId);
@@ -115,7 +122,7 @@ export async function POST(req) {
 
     for (let idx = 0; idx < incomingRows.length; idx += 1) {
       const row = incomingRows[idx] || {};
-      const rowNumber = row._row_number || idx + 2; // +1 header, +1 1-based
+      const rowNumber = row._row_number || idx + 2;
 
       const rawPhone = row.phone ?? row.customer_number ?? row.mobile ?? "";
       const phoneCheck = normalizeAndValidatePhone(rawPhone);
