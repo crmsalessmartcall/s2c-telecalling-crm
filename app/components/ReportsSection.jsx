@@ -1,16 +1,24 @@
 "use client";
 
 export default function ReportsSection({ reportData }) {
-  const summary = reportData?.summary || {
-    total_calls: 0,
-    connected_calls: 0,
-    avg_duration_seconds: 0,
-    total_leads: 0,
-    scheduled_followups: 0,
+  const rawSummary = reportData?.summary || {};
+  const summary = {
+    total_calls: Number(rawSummary.total_calls ?? 0),
+    connected_calls: Number(rawSummary.connected_calls ?? 0),
+    avg_duration_seconds: Number(rawSummary.avg_duration_seconds ?? 0),
+    total_leads: Number(rawSummary.total_leads ?? 0),
+    scheduled_followups: Number(rawSummary.scheduled_followups ?? 0),
   };
-  const dispositions = reportData?.dispositions || {};
-  const leadStatuses = reportData?.lead_statuses || {};
-  const recentCalls = reportData?.recent_calls || [];
+
+  const dispositions =
+    reportData?.dispositions && typeof reportData.dispositions === "object"
+      ? reportData.dispositions
+      : {};
+  const leadStatuses =
+    reportData?.lead_statuses && typeof reportData.lead_statuses === "object"
+      ? reportData.lead_statuses
+      : {};
+  const recentCalls = Array.isArray(reportData?.recent_calls) ? reportData.recent_calls : [];
 
   return (
     <section>
