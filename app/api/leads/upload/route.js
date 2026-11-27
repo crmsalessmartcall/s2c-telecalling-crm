@@ -1,121 +1,216 @@
 import { NextResponse } from "next/server";
-import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
+import { createClient } from "@supabase/supabase-js";
+import {
+  extractCustomFieldsFromRow,
+  normalizeAndValidatePhone,
+  normalizeFieldKey,
+} from "@/lib/ingestHelpers";
 
-function toKey(raw) {
-  return (
-    String(raw || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "") || `field_${Date.now()}`
-  );
+function getSupabaseServer() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
-function toLabel(key) {
-  return String(key || "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .trim();
-}
+const STD_KEYS = new Set([
+  "name",
+  "customer_name",
+  "phone",
+  "customer_number",
+  "email",
+  "notes",
+  "follow_up_at",
+  "assigned_to",
+  "status",
+  "disposition",
+  "source",
+]);
 
 export async function POST(req) {
   try {
-    const supabase = getServiceSupabase();
-    const caller = await getCallerProfile(req, supabase);
-    if (caller.error) {
-      return NextResponse.json({ error: caller.error }, { status: caller.status });
+    const supabase = getSupabaseServer();
+    if (!supabase) {
+      return NextResponse.json({ error: "Supabase server client not configured." }, { status: 500 });
+    }
+
+    const authHeader = req.headers.get("authorization") || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    if (!token) {
+      return NextResponse.json({ error: "Missing authorization token." }, { status: 401 });
+    }
+
+    const { data: authData, error: authErr } = await supabase.auth.getUser(token);
+    if (authErr || !authData?.user) {
+      return NextResponse.json({ error: "Invalid or expired session." }, { status: 401 });
+    }
+
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("id, role, tenant_id")
+      .eq("id", authData.user.id)
+      .maybeSingle();
+
+    if (!profile) {
+      return NextResponse.json({ error: "User profile not found." }, { status: 403 });
     }
 
     const body = await req.json();
+    const projectId = body?.project_id || null;
     const tenantId =
-      caller.profile.role === "super_admin" && body.tenant_id
-        ? body.tenant_id
-        : caller.profile.tenant_id;
+      profile.role === "super_admin" ? body?.tenant_id || profile.tenant_id || null : profile.tenant_id || null;
 
-    if (!tenantId) {
-      return NextResponse.json({ error: "tenant_id is required" }, { status: 400 });
+    const incomingRows = Array.isArray(body?.rows)
+      ? body.rows
+      : Array.isArray(body?.leads)
+      ? body.leads
+      : [];
+
+    if (incomingRows.length === 0) {
+      return NextResponse.json({ error: "No rows provided for import." }, { status: 400 });
     }
 
-    const projectId = body.project_id || null;
-    const mappedRows = Array.isArray(body.rows) ? body.rows : [];
-    const newFieldDefs = Array.isArray(body.new_fields) ? body.new_fields : [];
+    // 1. Create any new campaign/call fields requested via inline "Other" mapping
+    let createdFieldsCount = 0;
+    const newFields = Array.isArray(body?.new_fields) ? body.new_fields : [];
+    for (const nf of newFields) {
+      const key = normalizeFieldKey(nf?.field_key || nf?.label);
+      const label = String(nf?.label || nf?.field_key || "").trim();
+      if (!key || !label) continue;
 
-    // 1. Auto-create any new project call_fields requested from extra CSV columns
-    const createdKeys = new Set();
-    for (const nf of newFieldDefs) {
-      const fieldKey = toKey(nf.field_key || nf.label);
-      const label = String(nf.label || toLabel(fieldKey)).trim();
-      const fieldType = String(nf.field_type || "text").trim();
-      if (!fieldKey || createdKeys.has(fieldKey)) continue;
-      createdKeys.add(fieldKey);
-
-      let existingQ = supabase
-        .from("call_fields")
-        .select("id, field_key")
-        .eq("tenant_id", tenantId)
-        .eq("field_key", fieldKey);
-      existingQ = projectId ? existingQ.eq("project_id", projectId) : existingQ.is("project_id", null);
-
-      const { data: existingField } = await existingQ.maybeSingle();
-      if (!existingField) {
+      try {
         await supabase.from("call_fields").insert({
-          tenant_id: tenantId,
-          project_id: projectId,
-          field_key: fieldKey,
+          field_key: key,
           label,
-          field_type: fieldType,
-          is_required: false,
+          field_type: nf?.field_type || "text",
+          ...(projectId ? { project_id: projectId } : {}),
+          ...(tenantId ? { tenant_id: tenantId } : {}),
         });
+        createdFieldsCount += 1;
+      } catch {
+        // Ignore if field already exists
       }
     }
 
-    // 2. Build lead records
-    const insertPayloads = mappedRows
-      .map((r) => {
-        const name = String(r.name || "").trim();
-        const phone = String(r.phone || "").trim();
-        if (!name && !phone) return null;
+    // 2. Load existing leads in campaign/tenant for same-campaign phone deduplication
+    let existingQuery = supabase.from("leads").select("id, name, phone, email, notes, custom_fields, project_id");
+    if (projectId) {
+      existingQuery = existingQuery.eq("project_id", projectId);
+    } else if (tenantId) {
+      existingQuery = existingQuery.eq("tenant_id", tenantId);
+    }
+    const { data: existingLeads = [] } = await existingQuery;
 
-        return {
-          tenant_id: tenantId,
-          project_id: projectId,
-          name: name || `Lead ${phone}`,
-          phone: phone || "N/A",
-          email: r.email ? String(r.email).trim() : null,
-          notes: r.notes ? String(r.notes).trim() : null,
-          status: r.follow_up_at ? "follow_up" : r.status || "new",
-          follow_up_at: r.follow_up_at ? new Date(r.follow_up_at).toISOString() : null,
-          custom_fields:
-            r.custom_fields && typeof r.custom_fields === "object" ? r.custom_fields : {},
+    const byNormalizedPhone = new Map();
+    for (const lead of existingLeads || []) {
+      const norm = normalizeAndValidatePhone(lead.phone);
+      if (norm.normalized && !byNormalizedPhone.has(norm.normalized)) {
+        byNormalizedPhone.set(norm.normalized, lead);
+      }
+    }
+
+    let createdCount = 0;
+    let updatedCount = 0;
+    const errors = [];
+
+    for (let idx = 0; idx < incomingRows.length; idx += 1) {
+      const row = incomingRows[idx] || {};
+      const rowNumber = row._row_number || idx + 2; // +1 header, +1 1-based
+
+      const rawPhone = row.phone ?? row.customer_number ?? row.mobile ?? "";
+      const phoneCheck = normalizeAndValidatePhone(rawPhone);
+      if (!phoneCheck.valid) {
+        errors.push({
+          row_number: rowNumber,
+          raw: rawPhone || JSON.stringify(row).slice(0, 120),
+          reason: phoneCheck.reason,
+        });
+        continue;
+      }
+
+      const cleanPhone = phoneCheck.normalized;
+      const cleanName = String(row.name ?? row.customer_name ?? "").trim() || `Lead ${cleanPhone.slice(-4)}`;
+      const cleanEmail = String(row.email ?? "").trim() || null;
+      const cleanNotes = String(row.notes ?? "").trim() || null;
+      const customFields = extractCustomFieldsFromRow(row, STD_KEYS);
+
+      const existing = byNormalizedPhone.get(cleanPhone);
+      if (existing) {
+        const mergedCustom = {
+          ...(existing.custom_fields && typeof existing.custom_fields === "object"
+            ? existing.custom_fields
+            : {}),
+          ...customFields,
         };
-      })
-      .filter(Boolean);
 
-    if (insertPayloads.length === 0) {
-      return NextResponse.json(
-        { error: "No valid leads found after mapping (name or phone is required)" },
-        { status: 400 }
-      );
+        const updatePayload = {
+          name: row.name || row.customer_name ? cleanName : existing.name,
+          email: cleanEmail ?? existing.email,
+          notes: cleanNotes ?? existing.notes,
+          custom_fields: mergedCustom,
+        };
+
+        const { data: updatedLead, error: updErr } = await supabase
+          .from("leads")
+          .update(updatePayload)
+          .eq("id", existing.id)
+          .select("*")
+          .single();
+
+        if (updErr) {
+          errors.push({
+            row_number: rowNumber,
+            raw: cleanPhone,
+            reason: updErr.message,
+          });
+        } else {
+          updatedCount += 1;
+          byNormalizedPhone.set(cleanPhone, updatedLead || { ...existing, ...updatePayload });
+        }
+      } else {
+        const insertPayload = {
+          name: cleanName,
+          phone: cleanPhone,
+          email: cleanEmail,
+          notes: cleanNotes,
+          status: row.status || "new",
+          source: row.source || "csv_import",
+          custom_fields: customFields,
+          ...(projectId ? { project_id: projectId } : {}),
+          ...(tenantId ? { tenant_id: tenantId } : {}),
+          ...(row.assigned_to ? { assigned_to: row.assigned_to } : {}),
+          ...(row.follow_up_at ? { follow_up_at: row.follow_up_at } : {}),
+        };
+
+        const { data: insertedLead, error: insErr } = await supabase
+          .from("leads")
+          .insert(insertPayload)
+          .select("*")
+          .single();
+
+        if (insErr) {
+          errors.push({
+            row_number: rowNumber,
+            raw: cleanPhone,
+            reason: insErr.message,
+          });
+        } else {
+          createdCount += 1;
+          byNormalizedPhone.set(cleanPhone, insertedLead || insertPayload);
+        }
+      }
     }
 
-    const { data: inserted, error: insErr } = await supabase
-      .from("leads")
-      .insert(insertPayloads)
-      .select();
-
-    if (insErr) {
-      return NextResponse.json({ error: insErr.message }, { status: 400 });
-    }
-
-    return NextResponse.json(
-      {
-        uploaded_count: (inserted || []).length,
-        created_fields_count: createdKeys.size,
-        leads: inserted || [],
-      },
-      { status: 201 }
-    );
+    return NextResponse.json({
+      ok: true,
+      uploaded_count: createdCount + updatedCount,
+      created_count: createdCount,
+      updated_count: updatedCount,
+      error_count: errors.length,
+      errors,
+      created_fields_count: createdFieldsCount,
+    });
   } catch (err) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: err?.message || "Bulk lead import failed." }, { status: 500 });
   }
 }
