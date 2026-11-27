@@ -61,7 +61,7 @@ export default function CampaignsSection({
 
   const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(Boolean(selectedProjectId));
   const [activeCampaignTab, setActiveCampaignTab] = useState(
-    isAgent ? "pending_calls" : initialSubTab === "settings" ? "campaign" : "prospects"
+    isAgent ? "pending_calls" : "setting"
   );
 
   const [listTab, setListTab] = useState("active");
@@ -72,7 +72,6 @@ export default function CampaignsSection({
   const [creatingCampaign, setCreatingCampaign] = useState(false);
   const [busyProjectId, setBusyProjectId] = useState(null);
 
-  // Local state overlays so status/member/config/copy actions always reflect immediately
   const [localStatusById, setLocalStatusById] = useState({});
   const [localDeletedIds, setLocalDeletedIds] = useState([]);
   const [localClonedCampaigns, setLocalClonedCampaigns] = useState([]);
@@ -82,7 +81,7 @@ export default function CampaignsSection({
   useEffect(() => {
     if (initialSubTab === "settings" && !isAgent && selectedProjectId) {
       setIsWorkspaceOpen(true);
-      setActiveCampaignTab("campaign");
+      setActiveCampaignTab("setting");
     }
   }, [initialSubTab, isAgent, selectedProjectId]);
 
@@ -166,6 +165,7 @@ export default function CampaignsSection({
       return {
         fields: callFields || [],
         dispositions: dispositions || [],
+        formConfig: null,
       };
     }
     const stored = campaignConfigsById[selectedProjectId];
@@ -217,7 +217,7 @@ export default function CampaignsSection({
   function openCampaign(projectId) {
     onSelectProject?.(projectId);
     setIsWorkspaceOpen(true);
-    setActiveCampaignTab(isAgent ? "pending_calls" : "prospects");
+    setActiveCampaignTab(isAgent ? "pending_calls" : "setting");
   }
 
   function backToCampaignList() {
@@ -271,7 +271,7 @@ export default function CampaignsSection({
     setBusyProjectId(project.id);
     try {
       if (session?.access_token) {
-        const res = await safeJsonFetch("/api/projects", {
+        await safeJsonFetch("/api/projects", {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
@@ -284,22 +284,6 @@ export default function CampaignsSection({
             tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
           }),
         });
-        if (!res.ok) {
-          // Apply local status override so UI workflow stays unblocked even if backend rejects status enum
-          setLocalStatusById((prev) => ({ ...prev, [project.id]: nextStatus }));
-          if (nextStatus === "archived") {
-            setListTab("archived");
-            if (selectedProjectId === project.id) setIsWorkspaceOpen(false);
-          } else {
-            setListTab("active");
-          }
-          onNotify?.(
-            nextStatus === "archived"
-              ? `Moved "${project.name}" to Archived.`
-              : `Restored "${project.name}" to Active.`
-          );
-          return true;
-        }
       }
 
       setLocalStatusById((prev) => ({ ...prev, [project.id]: nextStatus }));
@@ -356,7 +340,7 @@ export default function CampaignsSection({
     }
   }
 
-  // Deep copy campaign: copies dispositions, fields, and form config — excludes customer/lead data
+  // Copies dispositions, custom fields, and form config — excludes lead/customer data
   async function handleDeepCopyCampaign(sourceProject) {
     if (!sourceProject) return;
     setBusyProjectId(sourceProject.id);
@@ -394,7 +378,6 @@ export default function CampaignsSection({
           body: JSON.stringify({
             name: `${sourceProject.name} (Copy)`,
             description: sourceProject.description || "",
-            script: sourceProject.script || "",
             hide_phone_numbers: Boolean(sourceProject.hide_phone_numbers),
             auto_dial: Boolean(sourceProject.auto_dial),
             status: "active",
@@ -481,13 +464,12 @@ export default function CampaignsSection({
         },
       }));
 
+      setListTab("active");
+      setCurrentPage(1);
       onNotify?.(
         `Copied "${sourceProject.name}" with ${clonedDisps.length} disposition(s), ${clonedFields.length} field(s), and form setup (customer data excluded).`
       );
       await onReloadAll?.();
-      onSelectProject?.(newCampaignId);
-      setIsWorkspaceOpen(true);
-      setActiveCampaignTab("campaign");
     } finally {
       setBusyProjectId(null);
     }
@@ -519,7 +501,7 @@ export default function CampaignsSection({
     }));
   }
 
-  // 1. Campaign List View (Active / Archived tabs, newest on top, 5 per page)
+  // 1. Main Campaign Selection List (Active / Archived, Archive & Copy buttons on main list)
   if (!isWorkspaceOpen || !activeCampaign) {
     const totalCount = projectsCountAll || combinedProjects.length;
     return (
@@ -748,23 +730,42 @@ export default function CampaignsSection({
                   {!isArchivedView ? (
                     <>
                       {canManageCampaign && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => handleSetCampaignStatus(proj, "archived")}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 7,
-                            border: "1px solid #cbd5e1",
-                            background: "#ffffff",
-                            color: "#475569",
-                            fontWeight: 600,
-                            fontSize: 12,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Archive
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => handleDeepCopyCampaign(proj)}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 7,
+                              border: "1px solid #fcd34d",
+                              background: "#fffbeb",
+                              color: "#b45309",
+                              fontWeight: 600,
+                              fontSize: 12,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {isBusy ? "Copying..." : "Copy"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => handleSetCampaignStatus(proj, "archived")}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 7,
+                              border: "1px solid #cbd5e1",
+                              background: "#ffffff",
+                              color: "#475569",
+                              fontWeight: 600,
+                              fontSize: 12,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Archive
+                          </button>
+                        </>
                       )}
                       <button
                         type="button"
@@ -890,14 +891,14 @@ export default function CampaignsSection({
     );
   }
 
-  // 2. Selected Campaign Workspace with 4 Tabs
+  // 2. Single Campaign Workspace (Opens on "Setting" first; no extra campaign switch dropdown)
   const tabs = isAgent
     ? [
         { id: "prospects", label: "Prospects", count: campaignLeads.length },
         { id: "pending_calls", label: "Pending Calls", count: pendingCallLeads.length, badge: true },
       ]
     : [
-        { id: "campaign", label: "Campaign" },
+        { id: "setting", label: "Setting" },
         { id: "members", label: "Members", count: assignedMemberIds.size },
         { id: "prospects", label: "Prospects", count: campaignLeads.length },
         { id: "pending_calls", label: "Pending Calls", count: pendingCallLeads.length, badge: true },
@@ -908,56 +909,31 @@ export default function CampaignsSection({
       <div
         style={{
           display: "flex",
-          justifyContent: "space-between",
           alignItems: "center",
+          gap: 12,
           flexWrap: "wrap",
-          gap: 10,
           marginBottom: 10,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            onClick={backToCampaignList}
-            style={{
-              padding: "6px 11px",
-              borderRadius: 7,
-              border: "1px solid #cbd5e1",
-              background: "#ffffff",
-              color: "#334155",
-              fontWeight: 600,
-              fontSize: 12,
-              cursor: "pointer",
-            }}
-          >
-            ← Campaigns
-          </button>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#0f172a" }}>
-            {activeCampaign.name}
-          </h2>
-        </div>
-
-        {activeList.length > 1 && (
-          <label style={{ fontSize: 12, color: "#475569" }}>
-            Campaign:{" "}
-            <select
-              value={selectedProjectId}
-              onChange={(e) => openCampaign(e.target.value)}
-              style={{
-                padding: "5px 8px",
-                borderRadius: 7,
-                border: "1px solid #cbd5e1",
-                background: "#ffffff",
-              }}
-            >
-              {activeList.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+        <button
+          type="button"
+          onClick={backToCampaignList}
+          style={{
+            padding: "6px 11px",
+            borderRadius: 7,
+            border: "1px solid #cbd5e1",
+            background: "#ffffff",
+            color: "#334155",
+            fontWeight: 600,
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          ← Campaigns
+        </button>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#0f172a" }}>
+          {activeCampaign.name}
+        </h2>
       </div>
 
       <div
@@ -1016,7 +992,7 @@ export default function CampaignsSection({
         })}
       </div>
 
-      {activeCampaignTab === "campaign" && !isAgent && (
+      {activeCampaignTab === "setting" && !isAgent && (
         <CampaignSettingsTab
           session={session}
           profile={profile}
@@ -1028,10 +1004,6 @@ export default function CampaignsSection({
           canManageCampaign={canManageCampaign}
           onReloadAll={onReloadAll}
           onNotify={onNotify}
-          onBackToList={backToCampaignList}
-          onSelectProject={onSelectProject}
-          onArchiveCampaign={() => handleSetCampaignStatus(activeCampaign, "archived")}
-          onCopyCampaign={() => handleDeepCopyCampaign(activeCampaign)}
           onUpdateCampaignConfig={(updater) =>
             updateCampaignConfigState(activeCampaign.id, updater)
           }
@@ -1061,16 +1033,11 @@ export default function CampaignsSection({
         <CampaignProspectsTab
           session={session}
           profile={profile}
-          tenants={tenants}
           selectedTenantScope={selectedTenantScope}
-          onChangeTenantScope={onChangeTenantScope}
-          activeProjects={activeList}
           campaign={activeCampaign}
-          onSelectCampaign={openCampaign}
           teamUsers={teamUsers}
           callFields={effectiveCampaignConfig.fields}
           dispositions={effectiveCampaignConfig.dispositions}
-          formConfig={effectiveCampaignConfig.formConfig}
           campaignLeads={campaignLeads}
           callLogs={callLogs}
           isAgent={isAgent}
@@ -1078,18 +1045,6 @@ export default function CampaignsSection({
           onReloadAll={onReloadAll}
           onNotify={onNotify}
           onDialLead={onDialLead}
-          onAddCustomField={(newField) =>
-            updateCampaignConfigState(activeCampaign.id, (cur) => ({
-              ...cur,
-              fields: [...(cur.fields || []), newField],
-            }))
-          }
-          onAddDisposition={(newDisp) =>
-            updateCampaignConfigState(activeCampaign.id, (cur) => ({
-              ...cur,
-              dispositions: [...(cur.dispositions || []), newDisp],
-            }))
-          }
         />
       )}
 
