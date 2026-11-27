@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { safeJsonFetch } from "@/lib/crmHelpers";
- 
+
 function getCustomFields(lead) {
   return lead?.custom_fields && typeof lead.custom_fields === "object" ? lead.custom_fields : {};
 }
@@ -13,6 +13,27 @@ function formatLocalInput(isoVal) {
   if (Number.isNaN(d.getTime())) return "";
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDurationClock(totalSeconds) {
+  const sec = Math.max(0, Number(totalSeconds || 0));
+  const mins = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return `${String(mins).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+}
+
+function getStatusBadgeStyle(status) {
+  const st = String(status || "new").toLowerCase();
+  if (st === "converted" || st === "connected" || st === "completed") {
+    return { bg: "#dcfce7", color: "#166534", border: "#86efac", label: `✓ ${st}` };
+  }
+  if (st === "follow_up") {
+    return { bg: "#fef3c7", color: "#92400e", border: "#fcd34d", label: "⏰ Follow-Up" };
+  }
+  if (st === "closed" || st === "no_answer" || st === "busy") {
+    return { bg: "#fee2e2", color: "#991b1b", border: "#fca5a5", label: `• ${st}` };
+  }
+  return { bg: "#dbeafe", color: "#1e40af", border: "#93c5fd", label: "✨ Fresh Lead" };
 }
 
 function matchesFilter(lead, filter) {
@@ -62,6 +83,8 @@ export default function DialerSection({
   onReload,
   onNotify,
 }) {
+  const isAgent = profile?.role === "agent";
+
   const [filter, setFilter] = useState({
     project_id: selectedProjectId || "",
     status: "all",
@@ -79,6 +102,8 @@ export default function DialerSection({
 
   const [queueActive, setQueueActive] = useState(false);
   const [queueIndex, setQueueIndex] = useState(0);
+  const [liveSeconds, setLiveSeconds] = useState(0);
+
   const [form, setForm] = useState({
     lead_id: "",
     phone: "",
@@ -90,6 +115,23 @@ export default function DialerSection({
     custom_fields: {},
     callStartedAt: null,
   });
+
+  useEffect(() => {
+    if (!form.callStartedAt) {
+      setLiveSeconds(0);
+      return;
+    }
+    const tick = () => {
+      const elapsed = Math.max(
+        0,
+        Math.round((Date.now() - new Date(form.callStartedAt).getTime()) / 1000)
+      );
+      setLiveSeconds(elapsed);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [form.callStartedAt]);
 
   useEffect(() => {
     if (!initialDialLead) return;
@@ -144,6 +186,24 @@ export default function DialerSection({
     [dispositions, form.disposition]
   );
 
+  const todayStats = useMemo(() => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayMs = startOfToday.getTime();
+    const todayCalls = (callLogs || []).filter((c) => {
+      const t = c.created_at ? new Date(c.created_at).getTime() : 0;
+      return !Number.isNaN(t) && t >= todayMs;
+    });
+    const connected = todayCalls.filter((c) =>
+      ["connected", "completed", "converted"].includes(String(c.status || "").toLowerCase())
+    ).length;
+    return {
+      callsToday: todayCalls.length,
+      connectedToday: connected,
+      queueRemaining: queueActive ? Math.max(0, queueLeads.length - queueIndex) : queueLeads.length,
+    };
+  }, [callLogs, queueActive, queueLeads, queueIndex]);
+
   const CALLS_PER_PAGE = 10;
   const totalPages = Math.max(1, Math.ceil((callLogs || []).length / CALLS_PER_PAGE));
   const pageCalls = useMemo(() => {
@@ -164,6 +224,14 @@ export default function DialerSection({
       custom_fields: { ...getCustomFields(lead) },
       callStartedAt: null,
     });
+  }
+
+  function applyQuickFollowUpOffset(hoursToAdd) {
+    const targetIso = new Date(Date.now() + hoursToAdd * 60 * 60 * 1000).toISOString();
+    setForm((prev) => ({
+      ...prev,
+      follow_up_at: formatLocalInput(targetIso),
+    }));
   }
 
   function handleDispositionChange(nextDispositionName) {
@@ -297,16 +365,73 @@ export default function DialerSection({
     await onReload();
   }
 
+  const badge = getStatusBadgeStyle(currentLead?.status || form.status);
+
   return (
     <section>
-      <h3>SmartCall Dialer Console</h3>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 14,
+        }}
+      >
+        <h3 style={{ margin: 0 }}>
+          📞 {isAgent ? "My Calling Desk" : "SmartCall Dialer Console"}
+        </h3>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <span
+            style={{
+              padding: "5px 10px",
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 700,
+              background: "#eff6ff",
+              color: "#1d4ed8",
+              border: "1px solid #bfdbfe",
+            }}
+          >
+            📊 Calls Today: {todayStats.callsToday}
+          </span>
+          <span
+            style={{
+              padding: "5px 10px",
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 700,
+              background: "#f0fdf4",
+              color: "#15803d",
+              border: "1px solid #bbf7d0",
+            }}
+          >
+            ✅ Connected: {todayStats.connectedToday}
+          </span>
+          <span
+            style={{
+              padding: "5px 10px",
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 700,
+              background: "#fefce8",
+              color: "#a16207",
+              border: "1px solid #fef08a",
+            }}
+          >
+            📋 Queue Ready: {todayStats.queueRemaining}
+          </span>
+        </div>
+      </div>
 
       <form
         onSubmit={handleApplyQueue}
         style={{
           padding: 12,
           border: "1px solid #cbd5e1",
-          borderRadius: 8,
+          borderRadius: 10,
           background: "#f8fafc",
           marginBottom: 16,
           display: "flex",
@@ -318,6 +443,7 @@ export default function DialerSection({
         <select
           value={filter.project_id}
           onChange={(e) => setFilter((f) => ({ ...f, project_id: e.target.value }))}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
         >
           <option value="">All Active Campaigns</option>
           {(activeProjects || []).map((p) => (
@@ -330,6 +456,7 @@ export default function DialerSection({
         <select
           value={filter.callKind}
           onChange={(e) => setFilter((f) => ({ ...f, callKind: e.target.value }))}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
         >
           <option value="all">Fresh & Follow-Up</option>
           <option value="fresh">Only Fresh Call</option>
@@ -340,6 +467,7 @@ export default function DialerSection({
         <select
           value={filter.status}
           onChange={(e) => setFilter((f) => ({ ...f, status: e.target.value }))}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
         >
           <option value="all">All Statuses</option>
           <option value="new">new</option>
@@ -352,6 +480,7 @@ export default function DialerSection({
         <select
           value={filter.disposition}
           onChange={(e) => setFilter((f) => ({ ...f, disposition: e.target.value }))}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
         >
           <option value="all">All Dispositions</option>
           <option value="__none__">No Disposition</option>
@@ -362,69 +491,143 @@ export default function DialerSection({
           ))}
         </select>
 
-        <select
-          value={filter.paramKey}
-          onChange={(e) => setFilter((f) => ({ ...f, paramKey: e.target.value }))}
+        {!isAgent && (
+          <>
+            <select
+              value={filter.paramKey}
+              onChange={(e) => setFilter((f) => ({ ...f, paramKey: e.target.value }))}
+              style={{ padding: "6px 8px", borderRadius: 6 }}
+            >
+              <option value="">Parameter Filter</option>
+              {paramOptions.map((po) => (
+                <option key={po.key} value={po.key}>
+                  {po.label}
+                </option>
+              ))}
+            </select>
+
+            <input
+              placeholder="Filter value (e.g. Mumbai)"
+              value={filter.paramValue}
+              onChange={(e) => setFilter((f) => ({ ...f, paramValue: e.target.value }))}
+              style={{ width: 150, padding: "6px 8px", borderRadius: 6 }}
+            />
+          </>
+        )}
+
+        <button
+          type="submit"
+          style={{
+            fontWeight: 700,
+            padding: "7px 14px",
+            borderRadius: 6,
+            border: "1px solid #1d4ed8",
+            background: "#2563eb",
+            color: "#ffffff",
+            cursor: "pointer",
+          }}
         >
-          <option value="">Parameter Filter</option>
-          {paramOptions.map((po) => (
-            <option key={po.key} value={po.key}>
-              {po.label}
-            </option>
-          ))}
-        </select>
-
-        <input
-          placeholder="Filter value (e.g. Mumbai)"
-          value={filter.paramValue}
-          onChange={(e) => setFilter((f) => ({ ...f, paramValue: e.target.value }))}
-          style={{ width: 150 }}
-        />
-
-        <button type="submit" style={{ fontWeight: "bold" }}>
-          Apply Filter ({queueLeads.length})
+          ▶ Start / Load Queue ({queueLeads.length})
         </button>
       </form>
 
-      <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 22 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-          <h4 style={{ margin: 0 }}>
-            Calling Workspace{" "}
-            {queueActive && queueLeads.length > 0
-              ? `(${queueIndex + 1} of ${queueLeads.length})`
-              : currentLead
-              ? `(One-Click / Selected Lead: ${currentLead.name})`
-              : "(Manual / Direct)"}
-          </h4>
+      <div
+        style={{
+          padding: 16,
+          border: form.callStartedAt ? "2px solid #16a34a" : "1px solid #cbd5e1",
+          borderRadius: 12,
+          background: "#ffffff",
+          marginBottom: 22,
+          boxShadow: "0 1px 4px rgba(15, 23, 42, 0.05)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <h4 style={{ margin: 0, fontSize: 16 }}>
+              Calling Workspace{" "}
+              {queueActive && queueLeads.length > 0
+                ? `(Lead ${queueIndex + 1} of ${queueLeads.length})`
+                : currentLead
+                ? `(${currentLead.name})`
+                : "(Direct / Manual)"}
+            </h4>
+
+            <span
+              style={{
+                padding: "3px 10px",
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 700,
+                background: badge.bg,
+                color: badge.color,
+                border: `1px solid ${badge.border}`,
+              }}
+            >
+              {badge.label}
+            </span>
+
+            {form.callStartedAt && (
+              <span
+                style={{
+                  padding: "3px 10px",
+                  borderRadius: 999,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  background: "#dcfce7",
+                  color: "#166534",
+                  border: "1px solid #4ade80",
+                }}
+              >
+                ● Live Call: {formatDurationClock(liveSeconds)}
+              </span>
+            )}
+          </div>
+
           {!queueActive && (
             <input
               placeholder="Phone number..."
               value={form.phone}
               onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))}
-              style={{ width: 200 }}
+              style={{ width: 210, padding: "7px 10px", borderRadius: 6, border: "1px solid #94a3b8" }}
             />
           )}
         </div>
 
         <div
           style={{
-            padding: 10,
+            padding: 12,
             background: "#f8fafc",
             border: "1px solid #e2e8f0",
-            borderRadius: 6,
-            marginBottom: 12,
+            borderRadius: 8,
+            marginBottom: 14,
             fontSize: 13,
           }}
         >
-          <div>
-            <strong>Lead:</strong> {currentLead?.name || "Direct Number"} | <strong>Phone:</strong>{" "}
-            {form.phone || "-"} | <strong>Status:</strong> <code>{currentLead?.status || "new"}</code> |{" "}
-            <strong>Last Disposition:</strong> {currentLead?.disposition || "-"}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <div>
+              <strong>👤 Prospect:</strong> {currentLead?.name || "Direct Number"}
+            </div>
+            <div>
+              <strong>📱 Phone:</strong>{" "}
+              <span style={{ fontWeight: 700, color: "#0f172a" }}>{form.phone || "-"}</span>
+            </div>
+            <div>
+              <strong>🏷️ Last Disposition:</strong> {currentLead?.disposition || "None"}
+            </div>
           </div>
-          <div style={{ marginTop: 4, fontSize: 12, color: "#475569" }}>
-            <strong>Follow-Up:</strong>{" "}
-            {currentLead?.follow_up_at ? new Date(currentLead.follow_up_at).toLocaleString() : "None"} |{" "}
-            <strong>Parameters:</strong>{" "}
+          <div style={{ marginTop: 6, fontSize: 12, color: "#475569" }}>
+            <strong>⏰ Follow-Up:</strong>{" "}
+            {currentLead?.follow_up_at ? new Date(currentLead.follow_up_at).toLocaleString() : "None"}{" "}
+            | <strong>📝 Details:</strong>{" "}
             {Object.entries(form.custom_fields || {})
               .filter(([, v]) => v !== "" && v != null)
               .map(([k, v]) => `${k}: ${v}`)
@@ -432,21 +635,63 @@ export default function DialerSection({
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-          <button type="button" onClick={handleStartCall} disabled={Boolean(form.callStartedAt)}>
-            Start Call
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+          <button
+            type="button"
+            onClick={handleStartCall}
+            disabled={Boolean(form.callStartedAt)}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid #15803d",
+              background: form.callStartedAt ? "#dcfce7" : "#16a34a",
+              color: form.callStartedAt ? "#166534" : "#ffffff",
+              fontWeight: 700,
+              cursor: form.callStartedAt ? "default" : "pointer",
+            }}
+          >
+            📞 Start Call
           </button>
-          <button type="button" onClick={handleEndCall} disabled={!form.callStartedAt}>
-            End Call
+
+          <button
+            type="button"
+            onClick={handleEndCall}
+            disabled={!form.callStartedAt}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid #d97706",
+              background: "#fef3c7",
+              color: "#92400e",
+              fontWeight: 700,
+              cursor: !form.callStartedAt ? "not-allowed" : "pointer",
+            }}
+          >
+            ⏹ End Call
           </button>
-          <button type="button" onClick={handleCancelCall} style={{ color: "#991b1b" }}>
-            Cancel Call
+
+          <button
+            type="button"
+            onClick={handleCancelCall}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #fca5a5",
+              background: "#fef2f2",
+              color: "#991b1b",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            ✕ Cancel Call
           </button>
-          <label style={{ fontSize: 12 }}>
-            Status:{" "}
+
+          <label style={{ fontSize: 12, fontWeight: 600 }}>
+            Call Status:{" "}
             <select
               value={form.status}
               onChange={(e) => setForm((prev) => ({ ...prev, status: e.target.value }))}
+              style={{ padding: "6px 8px", borderRadius: 6 }}
             >
               <option value="connected">connected</option>
               <option value="completed">completed</option>
@@ -454,14 +699,15 @@ export default function DialerSection({
               <option value="busy">busy</option>
             </select>
           </label>
-          <label style={{ fontSize: 12 }}>
+
+          <label style={{ fontSize: 12, fontWeight: 600 }}>
             Duration (s):{" "}
             <input
               type="number"
               min="0"
-              value={form.duration_seconds}
+              value={form.callStartedAt ? liveSeconds : form.duration_seconds}
               onChange={(e) => setForm((prev) => ({ ...prev, duration_seconds: e.target.value }))}
-              style={{ width: 68 }}
+              style={{ width: 72, padding: "6px 8px", borderRadius: 6 }}
             />
           </label>
         </div>
@@ -469,19 +715,19 @@ export default function DialerSection({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-            gap: 8,
-            marginBottom: 12,
+            gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+            gap: 10,
+            marginBottom: 14,
           }}
         >
-          <label style={{ fontSize: 12 }}>
+          <label style={{ fontSize: 12, fontWeight: 600 }}>
             Disposition:
             <select
               value={form.disposition}
               onChange={(e) => handleDispositionChange(e.target.value)}
-              style={{ width: "100%", marginTop: 2 }}
+              style={{ width: "100%", marginTop: 4, padding: "7px 8px", borderRadius: 6 }}
             >
-              <option value="">-- Select --</option>
+              <option value="">-- Select Disposition --</option>
               {(dispositions || []).map((d) => (
                 <option key={d.id} value={d.name}>
                   {d.name} {d.requires_followup ? "(Follow-Up)" : ""}
@@ -490,21 +736,34 @@ export default function DialerSection({
             </select>
           </label>
 
-          <label style={{ fontSize: 12 }}>
-            Follow-Up Time {selectedDispositionObj?.requires_followup ? "(Recommended)" : ""}:
+          <div style={{ fontSize: 12, fontWeight: 600 }}>
+            <div>
+              Follow-Up Time {selectedDispositionObj?.requires_followup ? "(Recommended)" : ""}:
+            </div>
             <input
               type="datetime-local"
               value={form.follow_up_at}
               onChange={(e) => setForm((prev) => ({ ...prev, follow_up_at: e.target.value }))}
-              style={{ width: "100%", marginTop: 2 }}
+              style={{ width: "100%", marginTop: 4, padding: "6px 8px", borderRadius: 6 }}
             />
-          </label>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+              <button type="button" onClick={() => applyQuickFollowUpOffset(1)} style={{ fontSize: 11, padding: "2px 6px" }}>
+                +1h
+              </button>
+              <button type="button" onClick={() => applyQuickFollowUpOffset(3)} style={{ fontSize: 11, padding: "2px 6px" }}>
+                +3h
+              </button>
+              <button type="button" onClick={() => applyQuickFollowUpOffset(24)} style={{ fontSize: 11, padding: "2px 6px" }}>
+                +24h
+              </button>
+            </div>
+          </div>
 
           {(callFields || []).map((cf) => {
             const inputType =
               cf.field_type === "number" ? "number" : cf.field_type === "date" ? "date" : "text";
             return (
-              <label key={cf.id} style={{ fontSize: 12 }}>
+              <label key={cf.id} style={{ fontSize: 12, fontWeight: 600 }}>
                 {cf.label}:
                 <input
                   type={inputType}
@@ -516,41 +775,58 @@ export default function DialerSection({
                       custom_fields: { ...prev.custom_fields, [cf.field_key]: val },
                     }));
                   }}
-                  style={{ width: "100%", marginTop: 2 }}
+                  style={{ width: "100%", marginTop: 4, padding: "7px 8px", borderRadius: 6 }}
                 />
               </label>
             );
           })}
 
-          <label style={{ fontSize: 12 }}>
-            Notes:
+          <label style={{ fontSize: 12, fontWeight: 600 }}>
+            Call Notes:
             <input
+              placeholder="Short summary of call..."
               value={form.notes}
               onChange={(e) => setForm((prev) => ({ ...prev, notes: e.target.value }))}
-              style={{ width: "100%", marginTop: 2 }}
+              style={{ width: "100%", marginTop: 4, padding: "7px 8px", borderRadius: 6 }}
             />
           </label>
         </div>
 
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button
             type="button"
             onClick={() => saveCall({ moveToNext: true })}
-            style={{ fontWeight: "bold", padding: "6px 12px" }}
+            style={{
+              fontWeight: 700,
+              padding: "9px 16px",
+              borderRadius: 8,
+              border: "1px solid #15803d",
+              background: "#16a34a",
+              color: "#ffffff",
+              cursor: "pointer",
+            }}
           >
-            Save & Next
+            💾 Save & Next Lead
           </button>
           <button
             type="button"
             onClick={() => saveCall({ moveToNext: false })}
-            style={{ padding: "6px 12px" }}
+            style={{
+              fontWeight: 600,
+              padding: "9px 16px",
+              borderRadius: 8,
+              border: "1px solid #64748b",
+              background: "#f1f5f9",
+              color: "#0f172a",
+              cursor: "pointer",
+            }}
           >
-            Save & Stop
+            ✓ Save & Stop
           </button>
         </div>
       </div>
 
-      <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+      <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
         <div
           style={{
             display: "flex",
@@ -562,7 +838,7 @@ export default function DialerSection({
           }}
         >
           <h4 style={{ margin: 0 }}>
-            Call Logs ({(callLogs || []).length} total — Page {callLogPage} of {totalPages}, 10 per page)
+            🕘 Call Logs ({(callLogs || []).length} total — Page {callLogPage} of {totalPages}, 10 per page)
           </h4>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <button
