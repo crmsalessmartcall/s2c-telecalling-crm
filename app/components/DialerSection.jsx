@@ -124,6 +124,14 @@ export default function DialerSection({
     callStartedAt: null,
   });
 
+  const projectById = useMemo(() => {
+    const map = {};
+    for (const p of activeProjects || []) {
+      map[p.id] = p;
+    }
+    return map;
+  }, [activeProjects]);
+
   useEffect(() => {
     if (!form.callStartedAt) {
       setLiveSeconds(0);
@@ -140,14 +148,6 @@ export default function DialerSection({
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [form.callStartedAt]);
-
-  const projectById = useMemo(() => {
-    const map = {};
-    for (const p of activeProjects || []) {
-      map[p.id] = p;
-    }
-    return map;
-  }, [activeProjects]);
 
   useEffect(() => {
     if (!initialDialLead) return;
