@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { safeJsonFetch } from "@/lib/crmHelpers";
-
+ 
 function getCustomFields(lead) {
   return lead?.custom_fields && typeof lead.custom_fields === "object" ? lead.custom_fields : {};
 }
