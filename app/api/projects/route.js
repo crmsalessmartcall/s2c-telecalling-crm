@@ -93,7 +93,7 @@ export async function PATCH(req) {
     }
 
     const body = await req.json().catch(() => ({}));
-    const projectId = body.id || body.project_id;
+    const projectId = body.id || body.project_id || body.campaign_id;
     if (!projectId) {
       return NextResponse.json({ error: "Campaign id is required" }, { status: 400 });
     }
@@ -117,7 +117,14 @@ export async function PATCH(req) {
     const updates = {};
     if (typeof body.status === "string" && body.status.trim()) {
       updates.status = body.status.trim();
+    } else if (typeof body.archived === "boolean") {
+      updates.status = body.archived ? "archived" : "active";
+    } else if (body.action === "archive") {
+      updates.status = "archived";
+    } else if (body.action === "unarchive" || body.action === "activate") {
+      updates.status = "active";
     }
+
     if (typeof body.name === "string" && body.name.trim()) {
       updates.name = body.name.trim();
     }
