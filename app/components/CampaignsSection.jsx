@@ -1,15 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { downloadSampleCsv, parseCsvRows, safeJsonFetch } from "@/lib/crmHelpers";
-
-function toKey(raw) {
-  return String(raw || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
+import { safeJsonFetch } from "@/lib/crmHelpers";
+import CampaignSettingsTab from "@/app/components/campaign/CampaignSettingsTab";
+import CampaignMembersTab from "@/app/components/campaign/CampaignMembersTab";
+import CampaignProspectsTab from "@/app/components/campaign/CampaignProspectsTab";
+import CampaignPendingCallsTab from "@/app/components/campaign/CampaignPendingCallsTab";
 
 function isLeadClosed(lead) {
   if (lead?.is_closed === true) return true;
@@ -20,7 +16,7 @@ function isLeadClosed(lead) {
 export default function CampaignsSection({
   session,
   profile,
-  tenants,
+  tenants = [],
   teamUsers = [],
   campaignMembers = [],
   selectedTenantScope,
@@ -39,65 +35,36 @@ export default function CampaignsSection({
 }) {
   const isAgent = profile?.role === "agent";
 
-  const [subTab, setSubTab] = useState(initialSubTab);
-  const [campaignView, setCampaignView] = useState(isAgent ? "pending_calls" : "prospects");
-  const [ingestChannel, setIngestChannel] = useState("csv");
+  const canManageCampaign = [
+    "super_admin",
+    "admin",
+    "manager",
+    "tenant_admin",
+    "supervisor",
+    "team_leader",
+  ].includes(profile?.role);
 
-  const [projectForm, setProjectForm] = useState({ name: "", description: "" });
-  const [fieldForm, setFieldForm] = useState({ label: "", field_type: "text" });
-  const [dispositionForm, setDispositionForm] = useState({ name: "", requires_followup: false });
-  const [memberSearch, setMemberSearch] = useState("");
-  const [savingMemberId, setSavingMemberId] = useState(null);
-  const [distributingLeads, setDistributingLeads] = useState(false);
-
-  const [leadForm, setLeadForm] = useState({
-    name: "",
-    phone: "",
-    serial_number: "",
-    email: "",
-    notes: "",
-    follow_up_at: "",
-    assigned_to: "",
-    custom_fields: {},
-  });
-
-  const [csvHeaders, setCsvHeaders] = useState([]);
-  const [csvRawRows, setCsvRawRows] = useState([]);
-  const [columnMapping, setColumnMapping] = useState({});
-  const [importingRows, setImportingRows] = useState(false);
-
-  const [importSummary, setImportSummary] = useState(null);
-  const [showErrorTable, setShowErrorTable] = useState(false);
-
-  const [apiTestPayload, setApiTestPayload] = useState(
-    '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
+  const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(Boolean(selectedProjectId));
+  const [activeCampaignTab, setActiveCampaignTab] = useState(
+    isAgent ? "pending_calls" : initialSubTab === "settings" ? "campaign" : "prospects"
   );
-
-  const [filters, setFilters] = useState({
-    status: "all",
-    disposition: "all",
-    callKind: "all",
-    assignedTo: "all",
-    source: "all",
-    paramKey: "",
-    paramValue: "",
-    search: "",
-  });
-
-  const [selectedLeadIds, setSelectedLeadIds] = useState([]);
-  const [targetAssigneeId, setTargetAssigneeId] = useState("");
-  const [allocatingLeads, setAllocatingLeads] = useState(false);
-  const [bulkFollowUpAt, setBulkFollowUpAt] = useState("");
+  const [projectForm, setProjectForm] = useState({ name: "", description: "" });
+  const [creatingCampaign, setCreatingCampaign] = useState(false);
 
   useEffect(() => {
-    if (initialSubTab) {
-      setSubTab(initialSubTab);
+    if (initialSubTab === "settings" && !isAgent && selectedProjectId) {
+      setIsWorkspaceOpen(true);
+      setActiveCampaignTab("campaign");
     }
-  }, [initialSubTab]);
+  }, [initialSubTab, isAgent, selectedProjectId]);
 
   useEffect(() => {
-    setSelectedLeadIds([]);
-  }, [selectedProjectId, campaignView]);
+    if (isAgent) {
+      setActiveCampaignTab((prev) =>
+        ["prospects", "pending_calls"].includes(prev) ? prev : "pending_calls"
+      );
+    }
+  }, [isAgent]);
 
   const activeCampaign = useMemo(
     () => activeProjects.find((p) => p.id === selectedProjectId) || null,
@@ -105,14 +72,9 @@ export default function CampaignsSection({
   );
 
   const campaignLeads = useMemo(() => {
-    if (!selectedProjectId) return leads || [];
-    return (leads || []).filter((l) => !l.project_id || l.project_id === selectedProjectId);
+    if (!selectedProjectId) return [];
+    return (leads || []).filter((l) => l.project_id === selectedProjectId);
   }, [leads, selectedProjectId]);
-
-  const unassignedCount = useMemo(
-    () => campaignLeads.filter((l) => !l.assigned_to).length,
-    [campaignLeads]
-  );
 
   const assignedMemberIds = useMemo(() => {
     const set = new Set(
@@ -131,653 +93,70 @@ export default function CampaignsSection({
     [campaignLeads]
   );
 
-  const userNameMap = useMemo(() => {
-    const map = {};
-    for (const u of teamUsers || []) {
-      map[u.id] = u.full_name || u.email || u.id;
-    }
-    return map;
-  }, [teamUsers]);
-
-  const paramOptions = useMemo(() => {
-    const opts = [
-      { key: "serial_number", label: "Serial Number (serial_number)" },
-      { key: "city", label: "City (city)" },
-    ];
-    for (const cf of callFields || []) {
-      if (cf.field_key && !["serial_number", "city"].includes(cf.field_key)) {
-        opts.push({ key: cf.field_key, label: `${cf.label} (${cf.field_key})` });
-      }
-    }
-    return opts;
-  }, [callFields]);
-
-  const filteredLeads = useMemo(() => {
-    const baseList = campaignView === "pending_calls" ? pendingCallLeads : campaignLeads;
-    return baseList.filter((lead) => {
-      if (filters.status !== "all" && (lead.status || "new") !== filters.status) return false;
-      if (filters.source !== "all" && (lead.source || "manual") !== filters.source) return false;
-
-      if (filters.assignedTo !== "all") {
-        if (filters.assignedTo === "__unassigned__" && lead.assigned_to) return false;
-        if (filters.assignedTo !== "__unassigned__" && lead.assigned_to !== filters.assignedTo) {
-          return false;
-        }
-      }
-
-      if (filters.disposition !== "all") {
-        if (filters.disposition === "__none__" && lead.disposition) return false;
-        if (filters.disposition !== "__none__" && (lead.disposition || "") !== filters.disposition) {
-          return false;
-        }
-      }
-
-      const hasFollowUp = Boolean(lead.follow_up_at);
-      const wasCalled = Boolean(lead.last_called_at) || (lead.status && lead.status !== "new");
-      if (filters.callKind === "fresh" && (hasFollowUp || wasCalled)) return false;
-      if (filters.callKind === "followup" && !hasFollowUp && (lead.status || "") !== "follow_up") {
-        return false;
-      }
-      if (filters.callKind === "fresh_and_followup") {
-        const isFresh = !hasFollowUp && !wasCalled;
-        const isFollowup = hasFollowUp || (lead.status || "") === "follow_up";
-        if (!isFresh && !isFollowup) return false;
-      }
-
-      if (filters.paramKey && filters.paramValue.trim()) {
-        const needle = filters.paramValue.trim().toLowerCase();
-        const cf = lead.custom_fields && typeof lead.custom_fields === "object" ? lead.custom_fields : {};
-        const val = cf[filters.paramKey] ?? lead[filters.paramKey] ?? "";
-        if (!String(val).toLowerCase().includes(needle)) return false;
-      }
-
-      if (filters.search.trim()) {
-        const q = filters.search.trim().toLowerCase();
-        const cf = lead.custom_fields && typeof lead.custom_fields === "object" ? lead.custom_fields : {};
-        const cfStr = Object.values(cf).join(" ").toLowerCase();
-        const match =
-          String(lead.name || "").toLowerCase().includes(q) ||
-          String(lead.phone || "").toLowerCase().includes(q) ||
-          String(lead.disposition || "").toLowerCase().includes(q) ||
-          String(lead.status || "").toLowerCase().includes(q) ||
-          cfStr.includes(q);
-        if (!match) return false;
-      }
-
-      return true;
-    });
-  }, [campaignView, pendingCallLeads, campaignLeads, filters]);
-
-  const selectedIdSet = useMemo(() => new Set(selectedLeadIds), [selectedLeadIds]);
-
-  const visibleSelectedIds = useMemo(
-    () => filteredLeads.map((l) => l.id).filter((id) => selectedIdSet.has(id)),
-    [filteredLeads, selectedIdSet]
-  );
-
-  const allFilteredSelected =
-    filteredLeads.length > 0 && visibleSelectedIds.length === filteredLeads.length;
-
-  const filteredMembersCandidates = useMemo(() => {
-    const q = memberSearch.trim().toLowerCase();
-    const list = teamUsers && teamUsers.length > 0 ? teamUsers : [];
-    if (!q) return list;
-    return list.filter(
-      (u) =>
-        String(u.full_name || "").toLowerCase().includes(q) ||
-        String(u.email || "").toLowerCase().includes(q) ||
-        String(u.role || "").toLowerCase().includes(q)
-    );
-  }, [teamUsers, memberSearch]);
-
-  function toggleRowSelection(leadId) {
-    setSelectedLeadIds((prev) =>
-      prev.includes(leadId) ? prev.filter((id) => id !== leadId) : [...prev, leadId]
-    );
+  function openCampaign(projectId) {
+    onSelectProject?.(projectId);
+    setIsWorkspaceOpen(true);
+    setActiveCampaignTab(isAgent ? "pending_calls" : "prospects");
   }
 
-  function toggleSelectAllFiltered() {
-    if (allFilteredSelected) {
-      const visibleSet = new Set(filteredLeads.map((l) => l.id));
-      setSelectedLeadIds((prev) => prev.filter((id) => !visibleSet.has(id)));
-    } else {
-      const merged = new Set([...selectedLeadIds, ...filteredLeads.map((l) => l.id)]);
-      setSelectedLeadIds(Array.from(merged));
-    }
-  }
-
-  function selectUnassignedInFiltered() {
-    const unassignedIds = filteredLeads.filter((l) => !l.assigned_to).map((l) => l.id);
-    setSelectedLeadIds(unassignedIds);
-    onNotify?.(`Selected ${unassignedIds.length} unassigned lead(s) in current filter.`);
-  }
-
-  async function applyAssigneeToLeads(ids, assigneeId, labelContext) {
-    if (!session?.access_token) return;
-    if (!Array.isArray(ids) || ids.length === 0) {
-      onNotify?.("Select at least one lead first.");
-      return;
-    }
-
-    setAllocatingLeads(true);
-    try {
-      const res = await safeJsonFetch("/api/leads", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          lead_ids: ids,
-          assigned_to: assigneeId || null,
-          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        }),
-      });
-
-      if (!res.ok) {
-        onNotify?.(res.data?.error || "Failed to allocate/transfer leads.");
-        return;
-      }
-
-      const targetLabel = assigneeId
-        ? userNameMap[assigneeId] || "selected agent"
-        : "Unassigned Pool";
-      setSelectedLeadIds((prev) => prev.filter((id) => !ids.includes(id)));
-      onNotify?.(`${labelContext}: assigned ${ids.length} lead(s) to ${targetLabel}.`);
-      await onReloadAll?.();
-    } finally {
-      setAllocatingLeads(false);
-    }
-  }
-
-  function applyAutoMapping(headers) {
-    const stdMap = {
-      name: "std:name",
-      customer_name: "std:name",
-      full_name: "std:name",
-      phone: "std:phone",
-      customer_number: "std:phone",
-      mobile: "std:phone",
-      email: "std:email",
-      serial_number: "std:serial_number",
-      notes: "std:notes",
-      follow_up_at: "std:follow_up_at",
-    };
-    const projectFieldKeys = new Set((callFields || []).map((f) => f.field_key));
-
-    const nextMap = {};
-    for (const h of headers) {
-      const norm = toKey(h);
-      if (stdMap[norm]) {
-        nextMap[h] = { target: stdMap[norm], newFieldName: h };
-      } else if (projectFieldKeys.has(norm)) {
-        nextMap[h] = { target: `custom:${norm}`, newFieldName: h };
-      } else {
-        nextMap[h] = { target: "new_field", newFieldName: h };
-      }
-    }
-    setColumnMapping(nextMap);
-  }
-
-  function handleCsvFileChange(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImportSummary(null);
-    setShowErrorTable(false);
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const parsed = parseCsvRows(String(reader.result || ""));
-      setCsvHeaders(parsed.headers);
-      setCsvRawRows(parsed.rows);
-      applyAutoMapping(parsed.headers);
-      onNotify?.(`Loaded ${parsed.rows.length} CSV row(s) from "${file.name}". Map columns and import.`);
-    };
-    reader.readAsText(file);
-  }
-
-  async function handleImportMappedRows(e) {
-    e.preventDefault();
-    if (!session?.access_token || csvRawRows.length === 0) return;
-
-    setImportingRows(true);
-    try {
-      const newFields = [];
-      for (const h of csvHeaders) {
-        const mapEntry = columnMapping[h];
-        if (mapEntry?.target === "new_field") {
-          const cleanKey = toKey(mapEntry.newFieldName || h);
-          if (cleanKey) {
-            newFields.push({
-              field_key: cleanKey,
-              label: String(mapEntry.newFieldName || h).trim(),
-              field_type: "text",
-            });
-          }
-        }
-      }
-
-      const mappedRows = csvRawRows.map((rawRow, index) => {
-        const rowObj = { _row_number: index + 2, custom_fields: {} };
-        for (const h of csvHeaders) {
-          const val = rawRow[h];
-          const mapEntry = columnMapping[h] || { target: "ignore" };
-          if (mapEntry.target === "ignore") continue;
-
-          if (mapEntry.target.startsWith("std:")) {
-            const stdKey = mapEntry.target.replace("std:", "");
-            if (stdKey === "serial_number") {
-              if (val !== "") rowObj.custom_fields.serial_number = val;
-            } else {
-              rowObj[stdKey] = val;
-            }
-          } else if (mapEntry.target.startsWith("custom:")) {
-            const cKey = mapEntry.target.replace("custom:", "");
-            if (val !== "") rowObj.custom_fields[cKey] = val;
-          } else if (mapEntry.target === "new_field") {
-            const nKey = toKey(mapEntry.newFieldName || h);
-            if (nKey && val !== "") rowObj.custom_fields[nKey] = val;
-          }
-        }
-        return rowObj;
-      });
-
-      const res = await safeJsonFetch("/api/leads/upload", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          project_id: selectedProjectId || null,
-          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-          new_fields: newFields,
-          rows: mappedRows,
-        }),
-      });
-
-      if (!res.ok) {
-        onNotify?.(res.data?.error || "Failed to import mapped leads.");
-        return;
-      }
-
-      const created = res.data.created_count ?? res.data.uploaded_count ?? 0;
-      const updated = res.data.updated_count ?? 0;
-      const errs = Array.isArray(res.data.errors) ? res.data.errors : [];
-
-      setImportSummary({
-        created,
-        updated,
-        errors: errs,
-      });
-      setShowErrorTable(errs.length > 0);
-      setCsvHeaders([]);
-      setCsvRawRows([]);
-      setColumnMapping({});
-
-      onNotify?.(
-        `Import finished — Created: ${created}, Updated: ${updated}, Errors: ${errs.length}.`
-      );
-      await onReloadAll?.();
-    } finally {
-      setImportingRows(false);
-    }
-  }
-
-  async function handleTestApiIngest(e) {
-    e.preventDefault();
-    if (!selectedProjectId) return;
-    let parsed = {};
-    try {
-      parsed = JSON.parse(apiTestPayload);
-    } catch {
-      onNotify?.("Invalid JSON payload for API-to-Lead test.");
-      return;
-    }
-
-    const res = await safeJsonFetch(`/api/campaigns/${encodeURIComponent(selectedProjectId)}/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(parsed),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "API-to-Lead request failed.");
-      return;
-    }
-    onNotify?.(`API lead created: "${res.data.lead?.name}" (${res.data.lead?.phone}).`);
-    await onReloadAll?.();
-  }
-
-  async function handleToggleCampaignMember(userId, currentlyAssigned) {
-    if (!session?.access_token || !selectedProjectId || !userId) return;
-    setSavingMemberId(userId);
-    try {
-      const res = await safeJsonFetch("/api/campaigns/members", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          campaign_id: selectedProjectId,
-          user_id: userId,
-          action: currentlyAssigned ? "remove" : "add",
-          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        }),
-      });
-      if (!res.ok) {
-        onNotify?.(res.data?.error || "Failed to update campaign member.");
-        return;
-      }
-      onNotify?.(
-        currentlyAssigned
-          ? `Removed ${userNameMap[userId] || "member"} from campaign.`
-          : `Assigned ${userNameMap[userId] || "member"} to campaign.`
-      );
-      await onReloadAll?.();
-    } finally {
-      setSavingMemberId(null);
-    }
-  }
-
-  async function handleDistributePendingLeadsEvenly() {
-    if (!session?.access_token || !selectedProjectId) return;
-    const memberIds = Array.from(assignedMemberIds);
-    if (memberIds.length === 0) {
-      onNotify?.("Assign at least one member to this campaign before distributing leads.");
-      return;
-    }
-    const targetLeads =
-      selectedLeadIds.length > 0
-        ? campaignLeads.filter((l) => selectedIdSet.has(l.id))
-        : pendingCallLeads.length > 0
-        ? pendingCallLeads
-        : campaignLeads;
-
-    if (targetLeads.length === 0) {
-      onNotify?.("No leads available in this campaign to distribute.");
-      return;
-    }
-
-    setDistributingLeads(true);
-    try {
-      let updatedCount = 0;
-      for (let i = 0; i < targetLeads.length; i += 1) {
-        const assigneeId = memberIds[i % memberIds.length];
-        const res = await safeJsonFetch("/api/leads", {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({ lead_id: targetLeads[i].id, assigned_to: assigneeId }),
-        });
-        if (res.ok) updatedCount += 1;
-      }
-      setSelectedLeadIds([]);
-      onNotify?.(`Distributed ${updatedCount} lead(s) across ${memberIds.length} campaign member(s).`);
-      await onReloadAll?.();
-    } finally {
-      setDistributingLeads(false);
-    }
+  function backToCampaignList() {
+    setIsWorkspaceOpen(false);
   }
 
   async function handleCreateCampaign(e) {
     e.preventDefault();
-    if (!session?.access_token) return;
-    const res = await safeJsonFetch("/api/projects", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        name: projectForm.name,
-        description: projectForm.description,
-        status: "active",
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-      }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to create campaign.");
-      return;
-    }
-    setProjectForm({ name: "", description: "" });
-    onNotify?.(`Created active campaign "${res.data.project?.name}".`);
-    if (res.data.project?.id) onSelectProject?.(res.data.project.id);
-    await onReloadAll?.();
-  }
-
-  async function handleAddDisposition(e) {
-    e.preventDefault();
-    if (!session?.access_token) return;
-    const res = await safeJsonFetch("/api/call-config", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        kind: "disposition",
-        name: dispositionForm.name,
-        requires_followup: dispositionForm.requires_followup,
-        project_id: selectedProjectId || null,
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-      }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to add disposition.");
-      return;
-    }
-    setDispositionForm({ name: "", requires_followup: false });
-    onNotify?.(`Added disposition "${res.data.disposition?.name}".`);
-    await onReloadAll?.();
-  }
-
-  async function handleAddCallField(e) {
-    e.preventDefault();
-    if (!session?.access_token) return;
-    const res = await safeJsonFetch("/api/call-config", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        kind: "field",
-        label: fieldForm.label,
-        field_type: fieldForm.field_type,
-        project_id: selectedProjectId || null,
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-      }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to add call field.");
-      return;
-    }
-    setFieldForm({ label: "", field_type: "text" });
-    onNotify?.(`Added call field "${res.data.field?.label}".`);
-    await onReloadAll?.();
-  }
-
-  async function handleAddSingleLead(e) {
-    e.preventDefault();
-    if (!session?.access_token) return;
-    const mergedCustom = { ...leadForm.custom_fields };
-    if (leadForm.serial_number.trim()) {
-      mergedCustom.serial_number = leadForm.serial_number.trim();
-    }
-
-    const res = await safeJsonFetch("/api/leads", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        name: leadForm.name,
-        phone: leadForm.phone,
-        email: leadForm.email,
-        notes: leadForm.notes,
-        follow_up_at: leadForm.follow_up_at || null,
-        assigned_to: leadForm.assigned_to || null,
-        source: "manual",
-        custom_fields: mergedCustom,
-        project_id: selectedProjectId || null,
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-      }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to add lead.");
-      return;
-    }
-    setLeadForm({
-      name: "",
-      phone: "",
-      serial_number: "",
-      email: "",
-      notes: "",
-      follow_up_at: "",
-      assigned_to: "",
-      custom_fields: {},
-    });
-    onNotify?.(`Added prospect "${res.data.lead?.name}".`);
-    await onReloadAll?.();
-  }
-
-  async function handleUpdateLead(leadId, patch) {
-    if (!session?.access_token) return;
-    const res = await safeJsonFetch("/api/leads", {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ lead_id: leadId, ...patch }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to update lead.");
-      return;
-    }
-    onNotify?.("Lead updated.");
-    await onReloadAll?.();
-  }
-
-  async function handleBulkSetFollowUp() {
-    if (!session?.access_token || !bulkFollowUpAt) return;
-    const ids =
-      selectedLeadIds.length > 0
-        ? filteredLeads.map((l) => l.id).filter((id) => selectedIdSet.has(id))
-        : filteredLeads.map((l) => l.id);
-    if (ids.length === 0) return;
-
-    const res = await safeJsonFetch("/api/leads", {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        lead_ids: ids,
-        follow_up_at: new Date(bulkFollowUpAt).toISOString(),
-        status: "follow_up",
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-      }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to set bulk follow-up.");
-      return;
-    }
-    onNotify?.(`Follow-up scheduled for ${ids.length} lead(s).`);
-    await onReloadAll?.();
-  }
-
-  async function handleBulkDeleteFiltered() {
-    if (!session?.access_token) return;
-    const ids =
-      selectedLeadIds.length > 0
-        ? filteredLeads.map((l) => l.id).filter((id) => selectedIdSet.has(id))
-        : filteredLeads.map((l) => l.id);
-    if (ids.length === 0) return;
-
-    const count = ids.length;
-    if (typeof window !== "undefined" && !window.confirm(`Delete ${count} lead(s)?`)) return;
-    const res = await safeJsonFetch("/api/leads", {
-      method: "DELETE",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        lead_ids: ids,
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-      }),
-    });
-    if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to delete leads.");
-      return;
-    }
-    setSelectedLeadIds((prev) => prev.filter((id) => !ids.includes(id)));
-    onNotify?.(`Deleted ${count} lead(s).`);
-    await onReloadAll?.();
-  }
-
-  async function copyTextToClipboard(text, successMsg) {
-    if (!text) return;
+    if (!session?.access_token || !projectForm.name.trim()) return;
+    setCreatingCampaign(true);
     try {
-      await navigator.clipboard.writeText(text);
-      onNotify?.(successMsg);
-    } catch {
-      onNotify?.("Clipboard copy failed. Copy manually from the box above.");
+      const res = await safeJsonFetch("/api/projects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          name: projectForm.name.trim(),
+          description: projectForm.description.trim(),
+          status: "active",
+          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        }),
+      });
+      if (!res.ok) {
+        onNotify?.(res.data?.error || "Failed to create campaign.");
+        return;
+      }
+      const createdId = res.data.project?.id;
+      const createdName = res.data.project?.name || projectForm.name.trim();
+      setProjectForm({ name: "", description: "" });
+      onNotify?.(`Created campaign "${createdName}".`);
+      await onReloadAll?.();
+      if (createdId) {
+        onSelectProject?.(createdId);
+        setIsWorkspaceOpen(true);
+        setActiveCampaignTab(isAgent ? "pending_calls" : "campaign");
+      }
+    } finally {
+      setCreatingCampaign(false);
     }
   }
 
-  const canManageCampaign = [
-    "super_admin",
-    "admin",
-    "manager",
-    "tenant_admin",
-    "supervisor",
-    "team_leader",
-  ].includes(profile?.role);
-
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const campaignIngestUrl = selectedProjectId
-    ? `${origin}/api/campaigns/${selectedProjectId}/ingest`
-    : "/api/campaigns/<campaign_id>/ingest";
-
-  const compactJsonBody = useMemo(() => {
-    try {
-      return JSON.stringify(JSON.parse(apiTestPayload));
-    } catch {
-      return apiTestPayload.replace(/\s+/g, " ").trim();
-    }
-  }, [apiTestPayload]);
-
-  const curlCommand = useMemo(
-    () =>
-      `curl --location --request POST '${campaignIngestUrl}' --header 'Content-Type: application/json' --data-raw '${compactJsonBody}'`,
-    [campaignIngestUrl, compactJsonBody]
-  );
-
-  const activeSelectionIds =
-    visibleSelectedIds.length > 0 ? visibleSelectedIds : selectedLeadIds;
-
-  return (
-    <section>
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          flexWrap: "wrap",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+  // 1. Campaign List View (Only campaign names first until clicked)
+  if (!isWorkspaceOpen || !activeCampaign) {
+    return (
+      <section>
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 14,
+          }}
+        >
           <h3 style={{ margin: 0 }}>
-            📋 {isAgent ? "My Campaigns" : "Campaigns"} ({activeProjects.length} / {projectsCountAll})
+            📋 {isAgent ? "My Campaigns" : "Campaigns"} ({activeProjects.length} /{" "}
+            {projectsCountAll})
           </h3>
 
           {profile?.role === "super_admin" && (tenants || []).length > 0 && (
@@ -785,7 +164,10 @@ export default function CampaignsSection({
               Tenant:{" "}
               <select
                 value={selectedTenantScope}
-                onChange={(e) => onChangeTenantScope?.(e.target.value)}
+                onChange={(e) => {
+                  setIsWorkspaceOpen(false);
+                  onChangeTenantScope?.(e.target.value);
+                }}
                 style={{ padding: "6px 8px", borderRadius: 6 }}
               >
                 {tenants.map((t) => (
@@ -796,15 +178,172 @@ export default function CampaignsSection({
               </select>
             </label>
           )}
+        </div>
 
-          <label style={{ fontSize: 13 }}>
-            Active Campaign:{" "}
+        {canManageCampaign && (
+          <div
+            style={{
+              marginBottom: 16,
+              padding: 14,
+              border: "1px solid #cbd5e1",
+              borderRadius: 10,
+              background: "#ffffff",
+            }}
+          >
+            <h4 style={{ marginTop: 0 }}>➕ Create New Campaign</h4>
+            <form
+              onSubmit={handleCreateCampaign}
+              style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+            >
+              <input
+                placeholder="Campaign Name *"
+                value={projectForm.name}
+                onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
+                required
+                style={{
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  border: "1px solid #cbd5e1",
+                  minWidth: 220,
+                }}
+              />
+              <input
+                placeholder="Description / Requirement"
+                value={projectForm.description}
+                onChange={(e) =>
+                  setProjectForm((f) => ({ ...f, description: e.target.value }))
+                }
+                style={{
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  border: "1px solid #cbd5e1",
+                  minWidth: 240,
+                }}
+              />
+              <button
+                type="submit"
+                disabled={creatingCampaign}
+                style={{
+                  padding: "7px 14px",
+                  borderRadius: 6,
+                  border: "1px solid #1d4ed8",
+                  background: "#2563eb",
+                  color: "#ffffff",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                {creatingCampaign ? "Creating..." : "Create Campaign"}
+              </button>
+            </form>
+          </div>
+        )}
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+            gap: 12,
+          }}
+        >
+          {activeProjects.map((proj) => (
+            <button
+              key={proj.id}
+              type="button"
+              onClick={() => openCampaign(proj.id)}
+              style={{
+                padding: "16px 18px",
+                borderRadius: 10,
+                border: "1px solid #cbd5e1",
+                background: "#ffffff",
+                textAlign: "left",
+                cursor: "pointer",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+              }}
+            >
+              <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>
+                {proj.name}
+              </span>
+              <span style={{ fontSize: 12, color: "#2563eb", fontWeight: 700 }}>
+                Open →
+              </span>
+            </button>
+          ))}
+
+          {activeProjects.length === 0 && (
+            <div
+              style={{
+                gridColumn: "1 / -1",
+                padding: 18,
+                border: "1px dashed #94a3b8",
+                borderRadius: 10,
+                color: "#475569",
+              }}
+            >
+              No active campaigns found in this scope.
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  // 2. Selected Campaign Detail View with 4 Tabs
+  const tabs = isAgent
+    ? [
+        { id: "prospects", label: "Prospects", count: campaignLeads.length },
+        { id: "pending_calls", label: "Pending Calls", count: pendingCallLeads.length, badge: true },
+      ]
+    : [
+        { id: "campaign", label: "Campaign" },
+        { id: "members", label: "Members", count: assignedMemberIds.size },
+        { id: "prospects", label: "Prospects", count: campaignLeads.length },
+        { id: "pending_calls", label: "Pending Calls", count: pendingCallLeads.length, badge: true },
+      ];
+
+  return (
+    <section>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 10,
+          marginBottom: 10,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={backToCampaignList}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 6,
+              border: "1px solid #cbd5e1",
+              background: "#f8fafc",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            ← All Campaigns
+          </button>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#0f172a" }}>
+            {activeCampaign.name}
+          </h2>
+        </div>
+
+        {activeProjects.length > 1 && (
+          <label style={{ fontSize: 12, color: "#475569" }}>
+            Switch Campaign:{" "}
             <select
               value={selectedProjectId}
-              onChange={(e) => onSelectProject?.(e.target.value)}
-              style={{ padding: "6px 8px", borderRadius: 6 }}
+              onChange={(e) => openCampaign(e.target.value)}
+              style={{ padding: "5px 8px", borderRadius: 6 }}
             >
-              <option value="">-- Select Active Campaign --</option>
               {activeProjects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -812,1087 +351,131 @@ export default function CampaignsSection({
               ))}
             </select>
           </label>
-        </div>
-
-        {selectedProjectId && !isAgent && (
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              type="button"
-              onClick={() => setSubTab("calling_data")}
-              style={{
-                fontWeight: subTab === "calling_data" ? 700 : 500,
-                padding: "6px 12px",
-                borderRadius: 6,
-                border: "1px solid #cbd5e1",
-                background: subTab === "calling_data" ? "#0f172a" : "#ffffff",
-                color: subTab === "calling_data" ? "#ffffff" : "#0f172a",
-                cursor: "pointer",
-              }}
-            >
-              Campaign Workspace
-            </button>
-            <button
-              type="button"
-              onClick={() => setSubTab("settings")}
-              style={{
-                fontWeight: subTab === "settings" ? 700 : 500,
-                padding: "6px 12px",
-                borderRadius: 6,
-                border: "1px solid #cbd5e1",
-                background: subTab === "settings" ? "#0f172a" : "#ffffff",
-                color: subTab === "settings" ? "#ffffff" : "#0f172a",
-                cursor: "pointer",
-              }}
-            >
-              Settings / Rules
-            </button>
-          </div>
         )}
       </div>
 
-      {canManageCampaign && (
-        <div
-          style={{
-            marginBottom: 16,
-            padding: 14,
-            border: "1px solid #cbd5e1",
-            borderRadius: 10,
-            background: "#ffffff",
-          }}
-        >
-          <h4 style={{ marginTop: 0 }}>➕ Create New Campaign</h4>
-          <form onSubmit={handleCreateCampaign} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <input
-              placeholder="Campaign Name"
-              value={projectForm.name}
-              onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
-              required
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-            />
-            <input
-              placeholder="Description / Requirement"
-              value={projectForm.description}
-              onChange={(e) => setProjectForm((f) => ({ ...f, description: e.target.value }))}
-              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", minWidth: 220 }}
-            />
+      {/* 4 Sub-Tabs Bar */}
+      <div
+        role="tablist"
+        style={{
+          display: "flex",
+          gap: 4,
+          borderBottom: "1px solid #cbd5e1",
+          marginBottom: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        {tabs.map((tab) => {
+          const isSelected = activeCampaignTab === tab.id;
+          return (
             <button
-              type="submit"
-              style={{
-                padding: "7px 14px",
-                borderRadius: 6,
-                border: "1px solid #1d4ed8",
-                background: "#2563eb",
-                color: "#ffffff",
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              Create Campaign
-            </button>
-          </form>
-        </div>
-      )}
-
-      {!selectedProjectId ? (
-        <div style={{ padding: 16, border: "1px dashed #94a3b8", borderRadius: 10, color: "#475569" }}>
-          Select an active campaign above to view <strong>Prospects</strong> and{" "}
-          <strong>Pending Calls</strong>.
-        </div>
-      ) : subTab === "settings" && !isAgent ? (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-            gap: 14,
-          }}
-        >
-          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
-            <h4 style={{ marginTop: 0 }}>
-              🏷️ Dispositions — {activeCampaign?.name} ({dispositions.length})
-            </h4>
-            <form onSubmit={handleAddDisposition} style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
-              <input
-                placeholder="Disposition name"
-                value={dispositionForm.name}
-                onChange={(e) => setDispositionForm((f) => ({ ...f, name: e.target.value }))}
-                required
-                style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-              />
-              <label style={{ fontSize: 12 }}>
-                <input
-                  type="checkbox"
-                  checked={dispositionForm.requires_followup}
-                  onChange={(e) =>
-                    setDispositionForm((f) => ({ ...f, requires_followup: e.target.checked }))
-                  }
-                />{" "}
-                Follow-up
-              </label>
-              <button type="submit" style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}>
-                Add
-              </button>
-            </form>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-              {dispositions.map((d) => (
-                <li key={d.id}>
-                  {d.name} {d.requires_followup ? "(Follow-Up)" : ""}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
-            <h4 style={{ marginTop: 0 }}>
-              🧩 Project Call Fields — {activeCampaign?.name} ({callFields.length})
-            </h4>
-            <form onSubmit={handleAddCallField} style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
-              <input
-                placeholder="Field label (e.g. City)"
-                value={fieldForm.label}
-                onChange={(e) => setFieldForm((f) => ({ ...f, label: e.target.value }))}
-                required
-                style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-              />
-              <select
-                value={fieldForm.field_type}
-                onChange={(e) => setFieldForm((f) => ({ ...f, field_type: e.target.value }))}
-                style={{ padding: "6px 8px", borderRadius: 6 }}
-              >
-                <option value="text">Text</option>
-                <option value="number">Number</option>
-                <option value="date">Date</option>
-              </select>
-              <button type="submit" style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}>
-                Add
-              </button>
-            </form>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-              {callFields.map((cf) => (
-                <li key={cf.id}>
-                  {cf.label} <code>({cf.field_key})</code>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      ) : (
-        <div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isAgent
-                ? "repeat(2, minmax(160px, 1fr))"
-                : "repeat(3, minmax(160px, 1fr))",
-              gap: 10,
-              marginBottom: 14,
-            }}
-          >
-            {!isAgent && (
-              <button
-                type="button"
-                onClick={() => setCampaignView("members")}
-                style={{
-                  padding: 12,
-                  textAlign: "left",
-                  borderRadius: 10,
-                  border: campaignView === "members" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-                  background: campaignView === "members" ? "#f1f5f9" : "#ffffff",
-                  cursor: "pointer",
-                }}
-              >
-                <div style={{ fontSize: 12, color: "#475569" }}>👥 Members</div>
-                <div style={{ fontSize: 20, fontWeight: 700 }}>{assignedMemberIds.size}</div>
-              </button>
-            )}
-
-            <button
+              key={tab.id}
               type="button"
-              onClick={() => setCampaignView("prospects")}
+              role="tab"
+              aria-selected={isSelected}
+              onClick={() => setActiveCampaignTab(tab.id)}
               style={{
-                padding: 12,
-                textAlign: "left",
-                borderRadius: 10,
-                border: campaignView === "prospects" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-                background: campaignView === "prospects" ? "#f1f5f9" : "#ffffff",
+                padding: "9px 14px",
+                borderTopLeftRadius: 8,
+                borderTopRightRadius: 8,
+                border: "1px solid",
+                borderColor: isSelected ? "#cbd5e1 #cbd5e1 #ffffff" : "transparent",
+                background: isSelected ? "#ffffff" : "transparent",
+                color: isSelected ? "#0f172a" : "#334155",
+                fontWeight: isSelected ? 700 : 500,
+                fontSize: 13,
                 cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                marginBottom: -1,
               }}
             >
-              <div style={{ fontSize: 12, color: "#475569" }}>
-                📇 Prospects {!isAgent ? `(${unassignedCount} unassigned)` : ""}
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700 }}>{campaignLeads.length}</div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setCampaignView("pending_calls")}
-              style={{
-                padding: 12,
-                textAlign: "left",
-                borderRadius: 10,
-                border: campaignView === "pending_calls" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-                background: campaignView === "pending_calls" ? "#f1f5f9" : "#ffffff",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontSize: 12, color: "#475569" }}>📞 Pending Calls</div>
-              <div style={{ fontSize: 20, fontWeight: 700 }}>{pendingCallLeads.length}</div>
-            </button>
-          </div>
-
-          {campaignView === "members" && !isAgent ? (
-            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, marginBottom: 16, background: "#ffffff" }}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 10,
-                  flexWrap: "wrap",
-                  marginBottom: 12,
-                }}
-              >
-                <div>
-                  <h4 style={{ margin: 0 }}>
-                    Campaign Members — {activeCampaign?.name} ({assignedMemberIds.size} assigned)
-                  </h4>
-                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
-                    Toggle users to assign or remove access to this campaign without leaving the page.
-                  </div>
-                </div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <input
-                    placeholder="Search user by name, email, role..."
-                    value={memberSearch}
-                    onChange={(e) => setMemberSearch(e.target.value)}
-                    style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-                  />
-                  {canManageCampaign && (
-                    <button
-                      type="button"
-                      onClick={handleDistributePendingLeadsEvenly}
-                      disabled={distributingLeads || assignedMemberIds.size === 0}
-                      style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
-                    >
-                      {distributingLeads ? "Distributing..." : "Distribute Pending Leads"}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: "#f1f5f9" }}>
-                    <th>Name</th>
-                    <th>Email</th>
-                    <th>Role</th>
-                    <th>Assignment</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredMembersCandidates.map((u) => {
-                    const isAssigned = assignedMemberIds.has(u.id);
-                    return (
-                      <tr key={u.id}>
-                        <td>
-                          <strong>{u.full_name || u.email}</strong>
-                        </td>
-                        <td>{u.email}</td>
-                        <td>
-                          <code>{u.role}</code>
-                        </td>
-                        <td>{isAssigned ? "Assigned Member" : "Not Assigned"}</td>
-                        <td>
-                          <button
-                            type="button"
-                            disabled={!canManageCampaign || savingMemberId === u.id}
-                            onClick={() => handleToggleCampaignMember(u.id, isAssigned)}
-                            style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-                          >
-                            {savingMemberId === u.id
-                              ? "Saving..."
-                              : isAssigned
-                              ? "Remove Member"
-                              : "Add Member"}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {filteredMembersCandidates.length === 0 && (
-                    <tr>
-                      <td colSpan="5">No team members found for current scope.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div>
-              {campaignView === "prospects" && !isAgent && (
-                <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, marginBottom: 16, background: "#ffffff" }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: 8,
-                      marginBottom: 12,
-                    }}
-                  >
-                    <h4 style={{ margin: 0 }}>📥 Add Prospects — {activeCampaign?.name}</h4>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        onClick={() => setIngestChannel("single")}
-                        style={{
-                          fontWeight: ingestChannel === "single" ? 700 : 500,
-                          padding: "6px 10px",
-                          borderRadius: 6,
-                          border: "1px solid #cbd5e1",
-                          cursor: "pointer",
-                        }}
-                      >
-                        1. Single Entry
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setIngestChannel("csv")}
-                        style={{
-                          fontWeight: ingestChannel === "csv" ? 700 : 500,
-                          padding: "6px 10px",
-                          borderRadius: 6,
-                          border: "1px solid #cbd5e1",
-                          cursor: "pointer",
-                        }}
-                      >
-                        2. CSV Import
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setIngestChannel("api")}
-                        style={{
-                          fontWeight: ingestChannel === "api" ? 700 : 500,
-                          padding: "6px 10px",
-                          borderRadius: 6,
-                          border: "1px solid #cbd5e1",
-                          cursor: "pointer",
-                        }}
-                      >
-                        3. API-to-Lead
-                      </button>
-                    </div>
-                  </div>
-
-                  {ingestChannel === "single" && (
-                    <form
-                      onSubmit={handleAddSingleLead}
-                      style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}
-                    >
-                      <input
-                        placeholder="Customer Name *"
-                        value={leadForm.name}
-                        onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
-                        required
-                      />
-                      <input
-                        placeholder="Customer Number (Phone) *"
-                        value={leadForm.phone}
-                        onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
-                        required
-                      />
-                      <input
-                        placeholder="Serial Number"
-                        value={leadForm.serial_number}
-                        onChange={(e) => setLeadForm((f) => ({ ...f, serial_number: e.target.value }))}
-                      />
-                      <input
-                        placeholder="Email"
-                        value={leadForm.email}
-                        onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
-                      />
-                      {teamUsers.length > 0 && (
-                        <select
-                          value={leadForm.assigned_to}
-                          onChange={(e) => setLeadForm((f) => ({ ...f, assigned_to: e.target.value }))}
-                        >
-                          <option value="">Unassigned Pool</option>
-                          {teamUsers.map((u) => (
-                            <option key={u.id} value={u.id}>
-                              Assign: {u.full_name || u.email} ({u.role})
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                      {callFields.map((cf) => (
-                        <input
-                          key={cf.id}
-                          placeholder={`${cf.label} (${cf.field_key})`}
-                          value={leadForm.custom_fields[cf.field_key] || ""}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setLeadForm((f) => ({
-                              ...f,
-                              custom_fields: { ...f.custom_fields, [cf.field_key]: val },
-                            }));
-                          }}
-                        />
-                      ))}
-                      <input
-                        placeholder="Notes"
-                        value={leadForm.notes}
-                        onChange={(e) => setLeadForm((f) => ({ ...f, notes: e.target.value }))}
-                      />
-                      <button type="submit" style={{ fontWeight: 700, padding: "7px 12px", borderRadius: 6, cursor: "pointer" }}>
-                        Save Prospect
-                      </button>
-                    </form>
-                  )}
-
-                  {ingestChannel === "csv" && (
-                    <div>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
-                        <button
-                          type="button"
-                          onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
-                          style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
-                        >
-                          Download Sample CSV
-                        </button>
-                      </div>
-
-                      {csvHeaders.length > 0 && (
-                        <form onSubmit={handleImportMappedRows} style={{ marginTop: 12, display: "grid", gap: 8 }}>
-                          <div style={{ fontSize: 13, fontWeight: 700 }}>
-                            Step 2 — Map Columns ({csvRawRows.length} rows ready; deduplicates by phone in campaign):
-                          </div>
-                          {csvHeaders.map((h) => {
-                            const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
-                            return (
-                              <div key={h} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
-                                <code style={{ minWidth: 120 }}>{h}</code>
-                                <select
-                                  value={entry.target}
-                                  onChange={(e) =>
-                                    setColumnMapping((prev) => ({
-                                      ...prev,
-                                      [h]: { ...entry, target: e.target.value },
-                                    }))
-                                  }
-                                >
-                                  <option value="std:name">Customer Name</option>
-                                  <option value="std:phone">Customer Number (Phone)</option>
-                                  <option value="std:serial_number">Serial Number</option>
-                                  <option value="std:email">Email</option>
-                                  <option value="std:notes">Notes</option>
-                                  <option value="std:follow_up_at">Follow-Up</option>
-                                  {callFields.map((cf) => (
-                                    <option key={cf.id} value={`custom:${cf.field_key}`}>
-                                      Field: {cf.label} ({cf.field_key})
-                                    </option>
-                                  ))}
-                                  <option value="new_field">Other / Create New Field</option>
-                                  <option value="ignore">Ignore Column</option>
-                                </select>
-                                {entry.target === "new_field" && (
-                                  <input
-                                    placeholder="New field name (e.g. Serial Number)"
-                                    value={entry.newFieldName}
-                                    onChange={(e) =>
-                                      setColumnMapping((prev) => ({
-                                        ...prev,
-                                        [h]: { ...entry, newFieldName: e.target.value },
-                                      }))
-                                    }
-                                    style={{ width: 180 }}
-                                  />
-                                )}
-                              </div>
-                            );
-                          })}
-                          <div>
-                            <button
-                              type="submit"
-                              disabled={importingRows}
-                              style={{
-                                fontWeight: 700,
-                                padding: "7px 14px",
-                                borderRadius: 6,
-                                border: "1px solid #15803d",
-                                background: "#16a34a",
-                                color: "#ffffff",
-                                cursor: "pointer",
-                              }}
-                            >
-                              {importingRows ? "Importing..." : "Run Import & Deduplicate"}
-                            </button>
-                          </div>
-                        </form>
-                      )}
-
-                      {importSummary && (
-                        <div style={{ marginTop: 14 }}>
-                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dcfce7", color: "#166534", fontSize: 12, fontWeight: 700 }}>
-                              Created ({importSummary.created})
-                            </span>
-                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dbeafe", color: "#1e40af", fontSize: 12, fontWeight: 700 }}>
-                              Updated ({importSummary.updated})
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => setShowErrorTable((v) => !v)}
-                              style={{
-                                padding: "4px 10px",
-                                borderRadius: 999,
-                                background: "#fee2e2",
-                                color: "#991b1b",
-                                border: "1px solid #fca5a5",
-                                fontSize: 12,
-                                fontWeight: 700,
-                                cursor: "pointer",
-                              }}
-                            >
-                              Errors ({importSummary.errors.length}) {showErrorTable ? "▲" : "▼"}
-                            </button>
-                          </div>
-
-                          {showErrorTable && importSummary.errors.length > 0 && (
-                            <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", marginTop: 10, fontSize: 12 }}>
-                              <thead>
-                                <tr>
-                                  <th>Row</th>
-                                  <th>Raw Phone / Data</th>
-                                  <th>Validation / Error Reason</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {importSummary.errors.map((err, i) => (
-                                  <tr key={i}>
-                                    <td>#{err.row_number}</td>
-                                    <td><code>{err.raw}</code></td>
-                                    <td style={{ color: "#991b1b" }}>{err.reason}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {ingestChannel === "api" && (
-                    <div style={{ display: "grid", gap: 10, maxWidth: 680 }}>
-                      <div
-                        style={{
-                          padding: 10,
-                          borderRadius: 8,
-                          background: "#f8fafc",
-                          border: "1px solid #cbd5e1",
-                          fontSize: 12,
-                        }}
-                      >
-                        <div style={{ fontWeight: 700, marginBottom: 4 }}>
-                          Unique Campaign POST Endpoint ({activeCampaign?.name || "Selected Campaign"}):
-                        </div>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                          <code style={{ wordBreak: "break-all" }}>POST {campaignIngestUrl}</code>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              copyTextToClipboard(
-                                campaignIngestUrl,
-                                "Copied unique campaign POST URL."
-                              )
-                            }
-                            style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
-                          >
-                            📋 Copy URL
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              copyTextToClipboard(
-                                curlCommand,
-                                "Copied POST cURL command for this campaign."
-                              )
-                            }
-                            style={{
-                              padding: "4px 10px",
-                              borderRadius: 6,
-                              border: "1px solid #1d4ed8",
-                              background: "#2563eb",
-                              color: "#ffffff",
-                              fontWeight: 700,
-                              cursor: "pointer",
-                            }}
-                          >
-                            📋 Copy cURL (POST)
-                          </button>
-                        </div>
-                      </div>
-
-                      <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap: 8 }}>
-                        <label style={{ fontSize: 12, fontWeight: 600 }}>
-                          JSON Body (used by both Test button and Copy cURL):
-                        </label>
-                        <textarea
-                          rows={5}
-                          value={apiTestPayload}
-                          onChange={(e) => setApiTestPayload(e.target.value)}
-                          style={{
-                            padding: 8,
-                            borderRadius: 6,
-                            border: "1px solid #cbd5e1",
-                            fontFamily: "monospace",
-                            fontSize: 12,
-                          }}
-                        />
-                        <button
-                          type="submit"
-                          style={{
-                            width: "fit-content",
-                            padding: "6px 12px",
-                            borderRadius: 6,
-                            border: "1px solid #15803d",
-                            background: "#16a34a",
-                            color: "#ffffff",
-                            fontWeight: 700,
-                            cursor: "pointer",
-                          }}
-                        >
-                          ▶ Send Test Lead to This Campaign
-                        </button>
-                      </form>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {campaignView === "pending_calls" && (
-                <div
+              <span>{tab.label}</span>
+              {typeof tab.count === "number" && (
+                <span
                   style={{
-                    padding: 12,
-                    border: "1px solid #cbd5e1",
-                    borderRadius: 10,
-                    background: "#f8fafc",
-                    marginBottom: 12,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                    gap: 10,
+                    padding: "1px 7px",
+                    borderRadius: 999,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    background: tab.badge ? "#dc2626" : "#e2e8f0",
+                    color: tab.badge ? "#ffffff" : "#1e293b",
                   }}
                 >
-                  <div>
-                    <strong>📞 Pending Calls Queue — {activeCampaign?.name}</strong>{" "}
-                    <span style={{ fontSize: 13, color: "#475569" }}>
-                      ({filteredLeads.length} matching of {pendingCallLeads.length} pending)
-                    </span>
-                  </div>
-                  {onDialLead && filteredLeads.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => onDialLead(filteredLeads[0])}
-                      style={{
-                        padding: "8px 16px",
-                        fontWeight: 700,
-                        background: "#16a34a",
-                        color: "#ffffff",
-                        border: "1px solid #15803d",
-                        borderRadius: 8,
-                        cursor: "pointer",
-                      }}
-                    >
-                      📞 Start Calling ({filteredLeads[0].name})
-                    </button>
-                  )}
-                </div>
+                  {tab.count}
+                </span>
               )}
+            </button>
+          );
+        })}
+      </div>
 
-              <div
-                style={{
-                  padding: 12,
-                  border: "1px solid #cbd5e1",
-                  borderRadius: 10,
-                  background: "#f8fafc",
-                  marginBottom: 12,
-                  display: "grid",
-                  gap: 8,
-                }}
-              >
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <select
-                    value={filters.status}
-                    onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
-                  >
-                    <option value="all">All Statuses</option>
-                    <option value="new">new</option>
-                    <option value="contacted">contacted</option>
-                    <option value="follow_up">follow_up</option>
-                    <option value="converted">converted</option>
-                    <option value="closed">closed</option>
-                  </select>
+      {activeCampaignTab === "campaign" && !isAgent && (
+        <CampaignSettingsTab
+          session={session}
+          profile={profile}
+          selectedTenantScope={selectedTenantScope}
+          campaign={activeCampaign}
+          callFields={callFields}
+          dispositions={dispositions}
+          canManageCampaign={canManageCampaign}
+          onReloadAll={onReloadAll}
+          onNotify={onNotify}
+          onBackToList={backToCampaignList}
+          onSelectProject={onSelectProject}
+        />
+      )}
 
-                  {!isAgent && (
-                    <select
-                      value={filters.source}
-                      onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}
-                    >
-                      <option value="all">All Sources</option>
-                      <option value="manual">manual</option>
-                      <option value="csv_import">csv_import</option>
-                      <option value="api">api</option>
-                    </select>
-                  )}
+      {activeCampaignTab === "members" && !isAgent && (
+        <CampaignMembersTab
+          session={session}
+          profile={profile}
+          selectedTenantScope={selectedTenantScope}
+          campaign={activeCampaign}
+          teamUsers={teamUsers}
+          assignedMemberIds={assignedMemberIds}
+          campaignLeads={campaignLeads}
+          pendingCallLeads={pendingCallLeads}
+          canManageCampaign={canManageCampaign}
+          onReloadAll={onReloadAll}
+          onNotify={onNotify}
+        />
+      )}
 
-                  {!isAgent && teamUsers.length > 0 && (
-                    <select
-                      value={filters.assignedTo}
-                      onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
-                    >
-                      <option value="all">All Assignees</option>
-                      <option value="__unassigned__">Unassigned Pool</option>
-                      {teamUsers.map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.full_name || u.email} ({u.role})
-                        </option>
-                      ))}
-                    </select>
-                  )}
+      {activeCampaignTab === "prospects" && (
+        <CampaignProspectsTab
+          session={session}
+          profile={profile}
+          selectedTenantScope={selectedTenantScope}
+          campaign={activeCampaign}
+          teamUsers={teamUsers}
+          assignedMemberIds={assignedMemberIds}
+          callFields={callFields}
+          dispositions={dispositions}
+          campaignLeads={campaignLeads}
+          pendingCallLeads={pendingCallLeads}
+          isAgent={isAgent}
+          canManageCampaign={canManageCampaign}
+          onReloadAll={onReloadAll}
+          onNotify={onNotify}
+          onDialLead={onDialLead}
+        />
+      )}
 
-                  <select
-                    value={filters.callKind}
-                    onChange={(e) => setFilters((f) => ({ ...f, callKind: e.target.value }))}
-                  >
-                    <option value="all">All Leads</option>
-                    <option value="fresh">Only Fresh Call</option>
-                    <option value="followup">Only Follow-Up Call</option>
-                    <option value="fresh_and_followup">Fresh & Follow-Up Call</option>
-                  </select>
-
-                  <select
-                    value={filters.disposition}
-                    onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-                  >
-                    <option value="all">All Dispositions</option>
-                    <option value="__none__">No Disposition</option>
-                    {dispositions.map((d) => (
-                      <option key={d.id} value={d.name}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-
-                  {!isAgent && (
-                    <>
-                      <select
-                        value={filters.paramKey}
-                        onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
-                      >
-                        <option value="">Parameter Filter</option>
-                        {paramOptions.map((po) => (
-                          <option key={po.key} value={po.key}>
-                            {po.label}
-                          </option>
-                        ))}
-                      </select>
-
-                      <input
-                        placeholder="Parameter value"
-                        value={filters.paramValue}
-                        onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
-                        style={{ width: 140 }}
-                      />
-                    </>
-                  )}
-
-                  <input
-                    placeholder="Search name / phone..."
-                    value={filters.search}
-                    onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
-                    style={{ width: 170 }}
-                  />
-                </div>
-
-                {!isAgent && canManageCampaign && teamUsers.length > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      flexWrap: "wrap",
-                      alignItems: "center",
-                      paddingTop: 8,
-                      borderTop: "1px dashed #cbd5e1",
-                    }}
-                  >
-                    <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a" }}>
-                      🔀 Allocate / Transfer ({activeSelectionIds.length} selected / {filteredLeads.length} filtered):
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={selectUnassignedInFiltered}
-                      disabled={filteredLeads.length === 0}
-                    >
-                      Select Unassigned
-                    </button>
-
-                    {activeSelectionIds.length > 0 && (
-                      <button type="button" onClick={() => setSelectedLeadIds([])}>
-                        Clear Selection
-                      </button>
-                    )}
-
-                    <select
-                      value={targetAssigneeId}
-                      onChange={(e) => setTargetAssigneeId(e.target.value)}
-                    >
-                      <option value="">-- Unassign (Return to Pool) --</option>
-                      {teamUsers.map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.full_name || u.email} ({u.role})
-                        </option>
-                      ))}
-                    </select>
-
-                    <button
-                      type="button"
-                      disabled={allocatingLeads || activeSelectionIds.length === 0}
-                      onClick={() =>
-                        applyAssigneeToLeads(
-                          activeSelectionIds,
-                          targetAssigneeId || null,
-                          "Selected allocation"
-                        )
-                      }
-                      style={{
-                        fontWeight: 700,
-                        padding: "5px 10px",
-                        borderRadius: 6,
-                        border: "1px solid #1d4ed8",
-                        background: "#2563eb",
-                        color: "#ffffff",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {allocatingLeads
-                        ? "Allocating..."
-                        : `Allocate Selected (${activeSelectionIds.length})`}
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={allocatingLeads || filteredLeads.length === 0}
-                      onClick={() =>
-                        applyAssigneeToLeads(
-                          filteredLeads.map((l) => l.id),
-                          targetAssigneeId || null,
-                          "Bulk filtered allocation"
-                        )
-                      }
-                      style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-                    >
-                      Allocate All Filtered ({filteredLeads.length})
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={distributingLeads || assignedMemberIds.size === 0}
-                      onClick={handleDistributePendingLeadsEvenly}
-                      style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
-                    >
-                      {distributingLeads
-                        ? "Distributing..."
-                        : activeSelectionIds.length > 0
-                        ? `Split Selected (${activeSelectionIds.length}) Evenly`
-                        : "Split Queue Evenly"}
-                    </button>
-                  </div>
-                )}
-
-                {!isAgent && (
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <span style={{ fontSize: 12, fontWeight: 700 }}>
-                      Bulk ({activeSelectionIds.length > 0 ? `${activeSelectionIds.length} selected` : `${filteredLeads.length} filtered`}):
-                    </span>
-                    <input
-                      type="datetime-local"
-                      value={bulkFollowUpAt}
-                      onChange={(e) => setBulkFollowUpAt(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      onClick={handleBulkSetFollowUp}
-                      disabled={!bulkFollowUpAt || (activeSelectionIds.length === 0 && filteredLeads.length === 0)}
-                    >
-                      Bulk Set Follow-Up
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleBulkDeleteFiltered}
-                      disabled={activeSelectionIds.length === 0 && filteredLeads.length === 0}
-                      style={{ color: "#991b1b" }}
-                    >
-                      {activeSelectionIds.length > 0
-                        ? `Delete Selected (${activeSelectionIds.length})`
-                        : `Delete Filtered (${filteredLeads.length})`}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: "#f1f5f9" }}>
-                    {!isAgent && (
-                      <th style={{ width: 34, textAlign: "center" }}>
-                        <input
-                          type="checkbox"
-                          checked={allFilteredSelected}
-                          onChange={toggleSelectAllFiltered}
-                          aria-label="Select all filtered leads"
-                        />
-                      </th>
-                    )}
-                    <th>Customer</th>
-                    <th>Phone</th>
-                    {!isAgent && <th>Source</th>}
-                    {!isAgent && <th>Assigned To</th>}
-                    <th>Parameters</th>
-                    <th>Status</th>
-                    <th>Last Disposition</th>
-                    <th>Follow-Up</th>
-                    {onDialLead && <th>Call</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredLeads.map((l) => {
-                    const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
-                    const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
-                    const isChecked = selectedIdSet.has(l.id);
-                    return (
-                      <tr key={l.id} style={{ background: isChecked ? "#eff6ff" : "#ffffff" }}>
-                        {!isAgent && (
-                          <td style={{ textAlign: "center" }}>
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => toggleRowSelection(l.id)}
-                              aria-label={`Select ${l.name}`}
-                            />
-                          </td>
-                        )}
-                        <td>
-                          <strong>{l.name}</strong>
-                          {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
-                        </td>
-                        <td><strong>{l.phone}</strong></td>
-                        {!isAgent && <td><code>{l.source || "manual"}</code></td>}
-                        {!isAgent && (
-                          <td>
-                            {teamUsers.length > 0 ? (
-                              <select
-                                value={l.assigned_to || ""}
-                                onChange={(e) =>
-                                  handleUpdateLead(l.id, { assigned_to: e.target.value || null })
-                                }
-                              >
-                                <option value="">Unassigned</option>
-                                {teamUsers.map((u) => (
-                                  <option key={u.id} value={u.id}>
-                                    {u.full_name || u.email} ({u.role})
-                                  </option>
-                                ))}
-                              </select>
-                            ) : (
-                              userNameMap[l.assigned_to] || "Unassigned"
-                            )}
-                          </td>
-                        )}
-                        <td>
-                          {entries.length > 0
-                            ? entries.map(([k, v]) => (
-                                <div key={k} style={{ fontSize: 12 }}>
-                                  <code>{k}</code>: <strong>{String(v)}</strong>
-                                </div>
-                              ))
-                            : "-"}
-                        </td>
-                        <td>
-                          <select
-                            value={l.status || "new"}
-                            onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
-                          >
-                            <option value="new">new</option>
-                            <option value="contacted">contacted</option>
-                            <option value="follow_up">follow_up</option>
-                            <option value="converted">converted</option>
-                            <option value="closed">closed</option>
-                          </select>
-                        </td>
-                        <td>
-                          <select
-                            value={l.disposition || ""}
-                            onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
-                          >
-                            <option value="">-- None --</option>
-                            {dispositions.map((d) => (
-                              <option key={d.id} value={d.name}>
-                                {d.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td>
-                          <input
-                            type="datetime-local"
-                            value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
-                            onChange={(e) =>
-                              handleUpdateLead(l.id, {
-                                follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
-                              })
-                            }
-                          />
-                        </td>
-                        {onDialLead && (
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => onDialLead(l)}
-                              style={{
-                                padding: "6px 12px",
-                                fontWeight: 700,
-                                background: "#16a34a",
-                                color: "#ffffff",
-                                border: "1px solid #15803d",
-                                borderRadius: 6,
-                                cursor: "pointer",
-                              }}
-                            >
-                              📞 Call
-                            </button>
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-                  {filteredLeads.length === 0 && (
-                    <tr>
-                      <td colSpan={isAgent ? (onDialLead ? "7" : "6") : onDialLead ? "10" : "9"}>
-                        No leads match the selected filters.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+      {activeCampaignTab === "pending_calls" && (
+        <CampaignPendingCallsTab
+          session={session}
+          profile={profile}
+          campaign={activeCampaign}
+          callFields={callFields}
+          dispositions={dispositions}
+          pendingCallLeads={pendingCallLeads}
+          isAgent={isAgent}
+          onReloadAll={onReloadAll}
+          onNotify={onNotify}
+          onDialLead={onDialLead}
+        />
       )}
     </section>
   );
