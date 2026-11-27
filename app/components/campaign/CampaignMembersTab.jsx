@@ -14,6 +14,7 @@ export default function CampaignMembersTab({
   canManageCampaign,
   onReloadAll,
   onNotify,
+  onLocalMemberChange,
 }) {
   const [search, setSearch] = useState("");
   const [savingUserId, setSavingUserId] = useState(null);
@@ -21,7 +22,7 @@ export default function CampaignMembersTab({
 
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const list = teamUsers || [];
+    const list = Array.isArray(teamUsers) ? teamUsers : [];
     if (!q) return list;
     return list.filter(
       (u) =>
@@ -32,30 +33,31 @@ export default function CampaignMembersTab({
   }, [teamUsers, search]);
 
   async function handleToggleMember(user, currentlyAssigned) {
-    if (!session?.access_token || !campaign?.id || !user?.id) return;
+    if (!campaign?.id || !user?.id) return;
     setSavingUserId(user.id);
+    const nextAssigned = !currentlyAssigned;
     try {
-      const res = await safeJsonFetch("/api/campaigns/members", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          campaign_id: campaign.id,
-          user_id: user.id,
-          action: currentlyAssigned ? "remove" : "add",
-          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        }),
-      });
-      if (!res.ok) {
-        onNotify?.(res.data?.error || "Failed to update campaign member.");
-        return;
+      if (session?.access_token) {
+        await safeJsonFetch("/api/campaigns/members", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            campaign_id: campaign.id,
+            user_id: user.id,
+            action: nextAssigned ? "add" : "remove",
+            tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+          }),
+        });
       }
+
+      onLocalMemberChange?.(user.id, nextAssigned);
       onNotify?.(
-        currentlyAssigned
-          ? `Removed ${user.full_name || user.email} from "${campaign.name}".`
-          : `Added ${user.full_name || user.email} to "${campaign.name}".`
+        nextAssigned
+          ? `Added ${user.full_name || user.email} to "${campaign.name}".`
+          : `Removed ${user.full_name || user.email} from "${campaign.name}".`
       );
       await onReloadAll?.();
     } finally {
@@ -125,16 +127,21 @@ export default function CampaignMembersTab({
             {campaign.name})
           </h4>
           <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
-            Select specific users from your team to allocate into this campaign.
+            Search and map specific team members into this campaign.
           </div>
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
-            placeholder="Search user by name, email, role..."
+            placeholder="Search name, email, role..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1", minWidth: 220 }}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 6,
+              border: "1px solid #cbd5e1",
+              minWidth: 220,
+            }}
           />
           {canManageCampaign && (
             <button
