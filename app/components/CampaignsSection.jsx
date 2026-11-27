@@ -81,6 +81,10 @@ export default function CampaignsSection({
     paramValue: "",
     search: "",
   });
+
+  const [selectedLeadIds, setSelectedLeadIds] = useState([]);
+  const [targetAssigneeId, setTargetAssigneeId] = useState("");
+  const [allocatingLeads, setAllocatingLeads] = useState(false);
   const [bulkFollowUpAt, setBulkFollowUpAt] = useState("");
 
   useEffect(() => {
@@ -88,6 +92,10 @@ export default function CampaignsSection({
       setSubTab(initialSubTab);
     }
   }, [initialSubTab]);
+
+  useEffect(() => {
+    setSelectedLeadIds([]);
+  }, [selectedProjectId, campaignView]);
 
   const activeCampaign = useMemo(
     () => activeProjects.find((p) => p.id === selectedProjectId) || null,
@@ -98,6 +106,11 @@ export default function CampaignsSection({
     if (!selectedProjectId) return leads || [];
     return (leads || []).filter((l) => !l.project_id || l.project_id === selectedProjectId);
   }, [leads, selectedProjectId]);
+
+  const unassignedCount = useMemo(
+    () => campaignLeads.filter((l) => !l.assigned_to).length,
+    [campaignLeads]
+  );
 
   const assignedMemberIds = useMemo(() => {
     const set = new Set(
@@ -193,6 +206,16 @@ export default function CampaignsSection({
     });
   }, [campaignView, pendingCallLeads, campaignLeads, filters]);
 
+  const selectedIdSet = useMemo(() => new Set(selectedLeadIds), [selectedLeadIds]);
+
+  const visibleSelectedIds = useMemo(
+    () => filteredLeads.map((l) => l.id).filter((id) => selectedIdSet.has(id)),
+    [filteredLeads, selectedIdSet]
+  );
+
+  const allFilteredSelected =
+    filteredLeads.length > 0 && visibleSelectedIds.length === filteredLeads.length;
+
   const filteredMembersCandidates = useMemo(() => {
     const q = memberSearch.trim().toLowerCase();
     const list = teamUsers && teamUsers.length > 0 ? teamUsers : [];
@@ -204,6 +227,66 @@ export default function CampaignsSection({
         String(u.role || "").toLowerCase().includes(q)
     );
   }, [teamUsers, memberSearch]);
+
+  function toggleRowSelection(leadId) {
+    setSelectedLeadIds((prev) =>
+      prev.includes(leadId) ? prev.filter((id) => id !== leadId) : [...prev, leadId]
+    );
+  }
+
+  function toggleSelectAllFiltered() {
+    if (allFilteredSelected) {
+      const visibleSet = new Set(filteredLeads.map((l) => l.id));
+      setSelectedLeadIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+    } else {
+      const merged = new Set([...selectedLeadIds, ...filteredLeads.map((l) => l.id)]);
+      setSelectedLeadIds(Array.from(merged));
+    }
+  }
+
+  function selectUnassignedInFiltered() {
+    const unassignedIds = filteredLeads.filter((l) => !l.assigned_to).map((l) => l.id);
+    setSelectedLeadIds(unassignedIds);
+    onNotify(`Selected ${unassignedIds.length} unassigned lead(s) in current filter.`);
+  }
+
+  async function applyAssigneeToLeads(ids, assigneeId, labelContext) {
+    if (!session?.access_token) return;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      onNotify("Select at least one lead first.");
+      return;
+    }
+
+    setAllocatingLeads(true);
+    try {
+      const res = await safeJsonFetch("/api/leads", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          lead_ids: ids,
+          assigned_to: assigneeId || null,
+          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        onNotify(res.data?.error || "Failed to allocate/transfer leads.");
+        return;
+      }
+
+      const targetLabel = assigneeId
+        ? userNameMap[assigneeId] || "selected agent"
+        : "Unassigned Pool";
+      setSelectedLeadIds((prev) => prev.filter((id) => !ids.includes(id)));
+      onNotify(`${labelContext}: assigned ${ids.length} lead(s) to ${targetLabel}.`);
+      await onReloadAll();
+    } finally {
+      setAllocatingLeads(false);
+    }
+  }
 
   function applyAutoMapping(headers) {
     const stdMap = {
@@ -402,7 +485,13 @@ export default function CampaignsSection({
       onNotify("Assign at least one member to this campaign before distributing leads.");
       return;
     }
-    const targetLeads = pendingCallLeads.length > 0 ? pendingCallLeads : campaignLeads;
+    const targetLeads =
+      selectedLeadIds.length > 0
+        ? campaignLeads.filter((l) => selectedIdSet.has(l.id))
+        : pendingCallLeads.length > 0
+        ? pendingCallLeads
+        : campaignLeads;
+
     if (targetLeads.length === 0) {
       onNotify("No leads available in this campaign to distribute.");
       return;
@@ -423,6 +512,7 @@ export default function CampaignsSection({
         });
         if (res.ok) updatedCount += 1;
       }
+      setSelectedLeadIds([]);
       onNotify(`Distributed ${updatedCount} lead(s) across ${memberIds.length} campaign member(s).`);
       await onReloadAll();
     } finally {
@@ -572,8 +662,13 @@ export default function CampaignsSection({
   }
 
   async function handleBulkSetFollowUp() {
-    if (!session?.access_token || !bulkFollowUpAt || filteredLeads.length === 0) return;
-    const ids = filteredLeads.map((l) => l.id);
+    if (!session?.access_token || !bulkFollowUpAt) return;
+    const ids =
+      selectedLeadIds.length > 0
+        ? filteredLeads.map((l) => l.id).filter((id) => selectedIdSet.has(id))
+        : filteredLeads.map((l) => l.id);
+    if (ids.length === 0) return;
+
     const res = await safeJsonFetch("/api/leads", {
       method: "PATCH",
       headers: {
@@ -591,15 +686,20 @@ export default function CampaignsSection({
       onNotify(res.data?.error || "Failed to set bulk follow-up.");
       return;
     }
-    onNotify(`Follow-up scheduled for ${ids.length} filtered lead(s).`);
+    onNotify(`Follow-up scheduled for ${ids.length} lead(s).`);
     await onReloadAll();
   }
 
   async function handleBulkDeleteFiltered() {
-    if (!session?.access_token || filteredLeads.length === 0) return;
-    const count = filteredLeads.length;
-    if (typeof window !== "undefined" && !window.confirm(`Delete ${count} filtered lead(s)?`)) return;
-    const ids = filteredLeads.map((l) => l.id);
+    if (!session?.access_token) return;
+    const ids =
+      selectedLeadIds.length > 0
+        ? filteredLeads.map((l) => l.id).filter((id) => selectedIdSet.has(id))
+        : filteredLeads.map((l) => l.id);
+    if (ids.length === 0) return;
+
+    const count = ids.length;
+    if (typeof window !== "undefined" && !window.confirm(`Delete ${count} lead(s)?`)) return;
     const res = await safeJsonFetch("/api/leads", {
       method: "DELETE",
       headers: {
@@ -612,10 +712,11 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to delete filtered leads.");
+      onNotify(res.data?.error || "Failed to delete leads.");
       return;
     }
-    onNotify(`Deleted ${count} filtered lead(s).`);
+    setSelectedLeadIds((prev) => prev.filter((id) => !ids.includes(id)));
+    onNotify(`Deleted ${count} lead(s).`);
     await onReloadAll();
   }
 
@@ -632,6 +733,9 @@ export default function CampaignsSection({
   const campaignIngestUrl = selectedProjectId
     ? `${origin}/api/campaigns/${selectedProjectId}/ingest`
     : "/api/campaigns/<campaign_id>/ingest";
+
+  const activeSelectionIds =
+    visibleSelectedIds.length > 0 ? visibleSelectedIds : selectedLeadIds;
 
   return (
     <section>
@@ -835,7 +939,9 @@ export default function CampaignsSection({
                 cursor: "pointer",
               }}
             >
-              <div style={{ fontSize: 12, color: "#475569" }}>Prospects</div>
+              <div style={{ fontSize: 12, color: "#475569" }}>
+                Prospects ({unassignedCount} unassigned)
+              </div>
               <div style={{ fontSize: 20, fontWeight: "bold" }}>{campaignLeads.length}</div>
             </button>
 
@@ -1016,7 +1122,7 @@ export default function CampaignsSection({
                           <option value="">Unassigned Pool</option>
                           {teamUsers.map((u) => (
                             <option key={u.id} value={u.id}>
-                              Assign: {u.full_name || u.email}
+                              Assign: {u.full_name || u.email} ({u.role})
                             </option>
                           ))}
                         </select>
@@ -1272,7 +1378,7 @@ export default function CampaignsSection({
                       <option value="__unassigned__">Unassigned Pool</option>
                       {teamUsers.map((u) => (
                         <option key={u.id} value={u.id}>
-                          {u.full_name || u.email}
+                          {u.full_name || u.email} ({u.role})
                         </option>
                       ))}
                     </select>
@@ -1328,9 +1434,99 @@ export default function CampaignsSection({
                   />
                 </div>
 
+                {/* Lead Allocation / Transfer Bar (Selected Checkboxes + Bulk Filtered) */}
+                {canManageCampaign && teamUsers.length > 0 && (
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      paddingTop: 6,
+                      borderTop: "1px dashed #cbd5e1",
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: "bold" }}>
+                      Allocate / Transfer ({activeSelectionIds.length} selected / {filteredLeads.length} filtered):
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={selectUnassignedInFiltered}
+                      disabled={filteredLeads.length === 0}
+                    >
+                      Select Unassigned
+                    </button>
+
+                    {activeSelectionIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedLeadIds([])}
+                      >
+                        Clear Selection
+                      </button>
+                    )}
+
+                    <select
+                      value={targetAssigneeId}
+                      onChange={(e) => setTargetAssigneeId(e.target.value)}
+                    >
+                      <option value="">-- Unassign (Return to Pool) --</option>
+                      {teamUsers.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.full_name || u.email} ({u.role})
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      disabled={allocatingLeads || activeSelectionIds.length === 0}
+                      onClick={() =>
+                        applyAssigneeToLeads(
+                          activeSelectionIds,
+                          targetAssigneeId || null,
+                          "Selected allocation"
+                        )
+                      }
+                      style={{ fontWeight: "bold" }}
+                    >
+                      {allocatingLeads
+                        ? "Allocating..."
+                        : `Allocate Selected (${activeSelectionIds.length})`}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={allocatingLeads || filteredLeads.length === 0}
+                      onClick={() =>
+                        applyAssigneeToLeads(
+                          filteredLeads.map((l) => l.id),
+                          targetAssigneeId || null,
+                          "Bulk filtered allocation"
+                        )
+                      }
+                    >
+                      Allocate All Filtered ({filteredLeads.length})
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={distributingLeads || assignedMemberIds.size === 0}
+                      onClick={handleDistributePendingLeadsEvenly}
+                    >
+                      {distributingLeads
+                        ? "Distributing..."
+                        : activeSelectionIds.length > 0
+                        ? `Split Selected (${activeSelectionIds.length}) Evenly`
+                        : "Split Queue Evenly"}
+                    </button>
+                  </div>
+                )}
+
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <span style={{ fontSize: 12, fontWeight: "bold" }}>
-                    Bulk ({filteredLeads.length} filtered):
+                    Bulk ({activeSelectionIds.length > 0 ? `${activeSelectionIds.length} selected` : `${filteredLeads.length} filtered`}):
                   </span>
                   <input
                     type="datetime-local"
@@ -1340,17 +1536,19 @@ export default function CampaignsSection({
                   <button
                     type="button"
                     onClick={handleBulkSetFollowUp}
-                    disabled={!bulkFollowUpAt || filteredLeads.length === 0}
+                    disabled={!bulkFollowUpAt || (activeSelectionIds.length === 0 && filteredLeads.length === 0)}
                   >
                     Bulk Set Follow-Up
                   </button>
                   <button
                     type="button"
                     onClick={handleBulkDeleteFiltered}
-                    disabled={filteredLeads.length === 0}
+                    disabled={activeSelectionIds.length === 0 && filteredLeads.length === 0}
                     style={{ color: "#991b1b" }}
                   >
-                    Delete Filtered
+                    {activeSelectionIds.length > 0
+                      ? `Delete Selected (${activeSelectionIds.length})`
+                      : `Delete Filtered (${filteredLeads.length})`}
                   </button>
                 </div>
               </div>
@@ -1358,6 +1556,14 @@ export default function CampaignsSection({
               <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
                   <tr>
+                    <th style={{ width: 34, textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleSelectAllFiltered}
+                        aria-label="Select all filtered leads"
+                      />
+                    </th>
                     <th>Customer</th>
                     <th>Phone</th>
                     <th>Source</th>
@@ -1373,8 +1579,17 @@ export default function CampaignsSection({
                   {filteredLeads.map((l) => {
                     const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
                     const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
+                    const isChecked = selectedIdSet.has(l.id);
                     return (
-                      <tr key={l.id}>
+                      <tr key={l.id} style={{ background: isChecked ? "#f0f9ff" : "transparent" }}>
+                        <td style={{ textAlign: "center" }}>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleRowSelection(l.id)}
+                            aria-label={`Select ${l.name}`}
+                          />
+                        </td>
                         <td>
                           <strong>{l.name}</strong>
                           {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
@@ -1392,7 +1607,7 @@ export default function CampaignsSection({
                               <option value="">Unassigned</option>
                               {teamUsers.map((u) => (
                                 <option key={u.id} value={u.id}>
-                                  {u.full_name || u.email}
+                                  {u.full_name || u.email} ({u.role})
                                 </option>
                               ))}
                             </select>
@@ -1468,7 +1683,7 @@ export default function CampaignsSection({
                   })}
                   {filteredLeads.length === 0 && (
                     <tr>
-                      <td colSpan={onDialLead ? "9" : "8"}>No leads match the selected filters.</td>
+                      <td colSpan={onDialLead ? "10" : "9"}>No leads match the selected filters.</td>
                     </tr>
                   )}
                 </tbody>
