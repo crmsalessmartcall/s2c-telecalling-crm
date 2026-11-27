@@ -34,7 +34,7 @@ function LicensePeriodBadge({ period }) {
         padding: "2px 8px",
         borderRadius: 999,
         fontSize: 11,
-        fontWeight: "bold",
+        fontWeight: 700,
         ...styles,
       }}
     >
@@ -76,14 +76,14 @@ export default function TeamSection({
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to add user.");
+      onNotify?.(res.data?.error || "Failed to add user.");
       return;
     }
 
     setNewUserForm({ full_name: "", email: "", password: "", role: "agent" });
     setShowAddUserForm(false);
-    onNotify(`Added user "${res.data.user?.full_name || res.data.user?.email}".`);
-    await onReload();
+    onNotify?.(`Added user "${res.data.user?.full_name || res.data.user?.email}".`);
+    await onReload?.();
   }
 
   async function handleResetUserPassword(e, targetUser) {
@@ -104,13 +104,13 @@ export default function TeamSection({
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to reset password.");
+      onNotify?.(res.data?.error || "Failed to reset password.");
       return;
     }
 
     setResetPasswordUserId(null);
     setResetPasswordValue("");
-    onNotify(`Password reset for ${targetUser.email}.`);
+    onNotify?.(`Password reset for ${targetUser.email}.`);
   }
 
   async function handleToggleUserActive(user) {
@@ -129,12 +129,12 @@ export default function TeamSection({
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to update user status.");
+      onNotify?.(res.data?.error || "Failed to update user status.");
       return;
     }
 
-    onNotify(`${user.email} is now ${!user.is_active ? "ACTIVE" : "DISABLED"}.`);
-    await onReload();
+    onNotify?.(`${user.email} is now ${!user.is_active ? "ACTIVE" : "DISABLED"}.`);
+    await onReload?.();
   }
 
   async function handleDeleteTeamUser(user) {
@@ -156,13 +156,18 @@ export default function TeamSection({
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to delete user.");
+      onNotify?.(res.data?.error || "Failed to delete user.");
       return;
     }
 
-    onNotify(`Deleted ${user.email} and freed seat.`);
-    await onReload();
+    onNotify?.(`Deleted ${user.email} and freed seat.`);
+    await onReload?.();
   }
+
+  const used = Number(licenseInfo?.used ?? 0);
+  const max = Number(licenseInfo?.max ?? 0);
+  const remaining = Number(licenseInfo?.remaining ?? 0);
+  const overCapacity = Number(licenseInfo?.overCapacity ?? 0);
 
   return (
     <section>
@@ -176,45 +181,75 @@ export default function TeamSection({
           marginBottom: 14,
         }}
       >
-        <h3 style={{ margin: 0 }}>
-          Team & Licenses — {licenseInfo.used} / {licenseInfo.max} active seats used (
-          {licenseInfo.remaining} available)
-        </h3>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>👥 Team & Licenses</h3>
+          <span
+            style={{
+              padding: "4px 10px",
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 700,
+              background: "#eff6ff",
+              color: "#1e40af",
+              border: "1px solid #bfdbfe",
+            }}
+          >
+            🪑 {used} / {max} active seats used ({remaining} available)
+          </span>
+        </div>
+
         <button
           type="button"
           onClick={() => setShowAddUserForm((prev) => !prev)}
-          style={{ padding: "7px 12px", fontWeight: "bold", cursor: "pointer" }}
+          style={{
+            padding: "8px 14px",
+            borderRadius: 8,
+            border: "1px solid #1d4ed8",
+            background: "#2563eb",
+            color: "#ffffff",
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
         >
-          {showAddUserForm ? "Close Add Member" : "+ Add Team Member"}
+          {showAddUserForm ? "✕ Close Add Member" : "➕ Add Team Member"}
         </button>
       </div>
 
-      {licenseInfo.overCapacity > 0 && (
+      {overCapacity > 0 && (
         <div
           style={{
-            padding: 10,
+            padding: 12,
             marginBottom: 14,
-            borderRadius: 6,
+            borderRadius: 8,
             background: "#fef2f2",
             border: "1px solid #fecaca",
             color: "#991b1b",
             fontSize: 13,
           }}
         >
-          Active seats are exceeded by <strong>{licenseInfo.overCapacity}</strong> user(s). Disable or
+          ⚠️ Active seats are exceeded by <strong>{overCapacity}</strong> user(s). Disable or
           delete users below or request more seats.
         </div>
       )}
 
       {showAddUserForm && (
-        <div style={{ marginBottom: 20, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <h4 style={{ marginTop: 0 }}>Add Team Member & Set Password</h4>
+        <div
+          style={{
+            marginBottom: 20,
+            padding: 14,
+            border: "1px solid #cbd5e1",
+            borderRadius: 10,
+            background: "#ffffff",
+          }}
+        >
+          <h4 style={{ marginTop: 0 }}>➕ Add Team Member & Set Password</h4>
           <form onSubmit={handleAddTeamUser} style={{ display: "grid", gap: 8, maxWidth: 460 }}>
             <input
               placeholder="Full Name"
               value={newUserForm.full_name}
               onChange={(e) => setNewUserForm((f) => ({ ...f, full_name: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <input
               type="email"
@@ -222,6 +257,7 @@ export default function TeamSection({
               value={newUserForm.email}
               onChange={(e) => setNewUserForm((f) => ({ ...f, email: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <input
               type="password"
@@ -229,17 +265,31 @@ export default function TeamSection({
               value={newUserForm.password}
               onChange={(e) => setNewUserForm((f) => ({ ...f, password: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <select
               value={newUserForm.role}
               onChange={(e) => setNewUserForm((f) => ({ ...f, role: e.target.value }))}
+              style={{ padding: "7px 10px", borderRadius: 6 }}
             >
               <option value="agent">Agent</option>
               <option value="team_leader">Team Leader</option>
               <option value="supervisor">Supervisor</option>
             </select>
-            <button type="submit" disabled={licenseInfo.remaining <= 0}>
-              {licenseInfo.remaining > 0 ? "Create Member (Uses 1 Seat)" : "No Seats Available"}
+            <button
+              type="submit"
+              disabled={remaining <= 0}
+              style={{
+                padding: "8px 14px",
+                borderRadius: 6,
+                border: "1px solid #15803d",
+                background: remaining > 0 ? "#16a34a" : "#e2e8f0",
+                color: remaining > 0 ? "#ffffff" : "#64748b",
+                fontWeight: 700,
+                cursor: remaining > 0 ? "pointer" : "not-allowed",
+              }}
+            >
+              {remaining > 0 ? "Create Member (Uses 1 Seat)" : "No Seats Available"}
             </button>
           </form>
         </div>
@@ -248,10 +298,10 @@ export default function TeamSection({
       <table
         border="1"
         cellPadding="8"
-        style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24 }}
+        style={{ width: "100%", borderCollapse: "collapse", marginBottom: 24, fontSize: 13 }}
       >
         <thead>
-          <tr>
+          <tr style={{ background: "#f1f5f9" }}>
             <th>Name</th>
             <th>Email</th>
             <th>Role</th>
@@ -262,12 +312,25 @@ export default function TeamSection({
         <tbody>
           {(teamUsers || []).map((u) => (
             <tr key={u.id}>
-              <td>{u.full_name}</td>
+              <td><strong>{u.full_name}</strong></td>
               <td>{u.email}</td>
+              <td><code>{u.role}</code></td>
               <td>
-                <code>{u.role}</code>
+                <span
+                  style={{
+                    display: "inline-block",
+                    padding: "2px 8px",
+                    borderRadius: 999,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    background: u.is_active ? "#dcfce7" : "#f1f5f9",
+                    color: u.is_active ? "#166534" : "#475569",
+                    border: u.is_active ? "1px solid #86efac" : "1px solid #cbd5e1",
+                  }}
+                >
+                  {u.is_active ? "● Active (1 seat)" : "○ Disabled (seat free)"}
+                </span>
               </td>
-              <td>{u.is_active ? "Active (1 seat)" : "Disabled (seat free)"}</td>
               <td>
                 <button
                   type="button"
@@ -275,20 +338,24 @@ export default function TeamSection({
                     setResetPasswordUserId((cur) => (cur === u.id ? null : u.id));
                     setResetPasswordValue("");
                   }}
-                  style={{ marginRight: 6 }}
+                  style={{ marginRight: 6, padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                 >
-                  Reset Password
+                  🔑 Reset Password
                 </button>
                 {u.id !== profile?.id && (
                   <>
                     <button
                       type="button"
                       onClick={() => handleToggleUserActive(u)}
-                      style={{ marginRight: 6 }}
+                      style={{ marginRight: 6, padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
                       {u.is_active ? "Disable User" : "Enable User"}
                     </button>
-                    <button type="button" onClick={() => handleDeleteTeamUser(u)}>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTeamUser(u)}
+                      style={{ padding: "4px 8px", borderRadius: 6, color: "#991b1b", cursor: "pointer" }}
+                    >
                       Delete User
                     </button>
                   </>
@@ -304,15 +371,18 @@ export default function TeamSection({
                       value={resetPasswordValue}
                       onChange={(e) => setResetPasswordValue(e.target.value)}
                       required
-                      style={{ padding: 4 }}
+                      style={{ padding: 5, borderRadius: 6, border: "1px solid #cbd5e1" }}
                     />
-                    <button type="submit">Save Password</button>
+                    <button type="submit" style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}>
+                      Save Password
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
                         setResetPasswordUserId(null);
                         setResetPasswordValue("");
                       }}
+                      style={{ padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
                       Cancel
                     </button>
@@ -324,10 +394,10 @@ export default function TeamSection({
         </tbody>
       </table>
 
-      <h4>Your Tenant License History</h4>
+      <h4>📜 Your Tenant License History</h4>
       <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
         <thead>
-          <tr>
+          <tr style={{ background: "#f1f5f9" }}>
             <th>Seats</th>
             <th>License Label</th>
             <th>Start Date</th>
@@ -338,7 +408,7 @@ export default function TeamSection({
         <tbody>
           {(tenantLicenseHistory || []).map((lp) => (
             <tr key={lp.id}>
-              <td>+{lp.seat_count}</td>
+              <td><strong>+{lp.seat_count}</strong></td>
               <td>
                 <LicensePeriodBadge period={lp} />
               </td>
