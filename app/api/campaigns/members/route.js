@@ -1,14 +1,7 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { getServiceSupabase } from "@/lib/supabaseServer";
 
 export const dynamic = "force-dynamic";
-
-function getSupabaseServer() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false } });
-}
 
 async function authenticateRequest(req, supabase) {
   const authHeader = req.headers.get("authorization") || "";
@@ -37,7 +30,7 @@ async function authenticateRequest(req, supabase) {
 
 export async function GET(req) {
   try {
-    const supabase = getSupabaseServer();
+    const supabase = getServiceSupabase();
     if (!supabase) {
       return NextResponse.json({ error: "Supabase server client not configured." }, { status: 500 });
     }
@@ -80,7 +73,7 @@ export async function GET(req) {
 
 export async function POST(req) {
   try {
-    const supabase = getSupabaseServer();
+    const supabase = getServiceSupabase();
     if (!supabase) {
       return NextResponse.json({ error: "Supabase server client not configured." }, { status: 500 });
     }
@@ -170,7 +163,7 @@ export async function POST(req) {
 
 export async function DELETE(req) {
   try {
-    const supabase = getSupabaseServer();
+    const supabase = getServiceSupabase();
     if (!supabase) {
       return NextResponse.json({ error: "Supabase server client not configured." }, { status: 500 });
     }
