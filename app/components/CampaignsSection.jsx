@@ -37,8 +37,10 @@ export default function CampaignsSection({
   onNotify,
   onDialLead,
 }) {
+  const isAgent = profile?.role === "agent";
+
   const [subTab, setSubTab] = useState(initialSubTab);
-  const [campaignView, setCampaignView] = useState("prospects"); // "members" | "prospects" | "pending_calls"
+  const [campaignView, setCampaignView] = useState(isAgent ? "pending_calls" : "prospects"); // "members" | "prospects" | "pending_calls"
   const [ingestChannel, setIngestChannel] = useState("csv"); // "single" | "csv" | "api"
 
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
@@ -751,7 +753,7 @@ export default function CampaignsSection({
       >
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           <h3 style={{ margin: 0 }}>
-            Campaigns ({activeProjects.length} / {projectsCountAll})
+            📋 {isAgent ? "My Campaigns" : "Campaigns"} ({activeProjects.length} / {projectsCountAll})
           </h3>
 
           {profile?.role === "super_admin" && tenants.length > 0 && (
@@ -760,6 +762,7 @@ export default function CampaignsSection({
               <select
                 value={selectedTenantScope}
                 onChange={(e) => onChangeTenantScope(e.target.value)}
+                style={{ padding: "6px 8px", borderRadius: 6 }}
               >
                 {tenants.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -775,6 +778,7 @@ export default function CampaignsSection({
             <select
               value={selectedProjectId}
               onChange={(e) => onSelectProject(e.target.value)}
+              style={{ padding: "6px 8px", borderRadius: 6 }}
             >
               <option value="">-- Select Active Campaign --</option>
               {activeProjects.map((p) => (
@@ -786,19 +790,35 @@ export default function CampaignsSection({
           </label>
         </div>
 
-        {selectedProjectId && (
+        {selectedProjectId && !isAgent && (
           <div style={{ display: "flex", gap: 6 }}>
             <button
               type="button"
               onClick={() => setSubTab("calling_data")}
-              style={{ fontWeight: subTab === "calling_data" ? "bold" : "normal" }}
+              style={{
+                fontWeight: subTab === "calling_data" ? 700 : 500,
+                padding: "6px 12px",
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                background: subTab === "calling_data" ? "#0f172a" : "#ffffff",
+                color: subTab === "calling_data" ? "#ffffff" : "#0f172a",
+                cursor: "pointer",
+              }}
             >
               Campaign Workspace
             </button>
             <button
               type="button"
               onClick={() => setSubTab("settings")}
-              style={{ fontWeight: subTab === "settings" ? "bold" : "normal" }}
+              style={{
+                fontWeight: subTab === "settings" ? 700 : 500,
+                padding: "6px 12px",
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                background: subTab === "settings" ? "#0f172a" : "#ffffff",
+                color: subTab === "settings" ? "#ffffff" : "#0f172a",
+                cursor: "pointer",
+              }}
             >
               Settings / Rules
             </button>
@@ -807,31 +827,54 @@ export default function CampaignsSection({
       </div>
 
       {canManageCampaign && (
-        <div style={{ marginBottom: 16, padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <h4 style={{ marginTop: 0 }}>Create New Campaign</h4>
+        <div
+          style={{
+            marginBottom: 16,
+            padding: 14,
+            border: "1px solid #cbd5e1",
+            borderRadius: 10,
+            background: "#ffffff",
+          }}
+        >
+          <h4 style={{ marginTop: 0 }}>➕ Create New Campaign</h4>
           <form onSubmit={handleCreateCampaign} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input
               placeholder="Campaign Name"
               value={projectForm.name}
               onChange={(e) => setProjectForm((f) => ({ ...f, name: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <input
               placeholder="Description / Requirement"
               value={projectForm.description}
               onChange={(e) => setProjectForm((f) => ({ ...f, description: e.target.value }))}
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", minWidth: 220 }}
             />
-            <button type="submit">Create New Campaign</button>
+            <button
+              type="submit"
+              style={{
+                padding: "7px 14px",
+                borderRadius: 6,
+                border: "1px solid #1d4ed8",
+                background: "#2563eb",
+                color: "#ffffff",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Create Campaign
+            </button>
           </form>
         </div>
       )}
 
       {!selectedProjectId ? (
-        <div style={{ padding: 16, border: "1px dashed #94a3b8", borderRadius: 8, color: "#475569" }}>
-          Select an active campaign above to view <strong>Members</strong>, <strong>Prospects</strong>, and{" "}
+        <div style={{ padding: 16, border: "1px dashed #94a3b8", borderRadius: 10, color: "#475569" }}>
+          Select an active campaign above to view <strong>Prospects</strong> and{" "}
           <strong>Pending Calls</strong>.
         </div>
-      ) : subTab === "settings" ? (
+      ) : subTab === "settings" && !isAgent ? (
         <div
           style={{
             display: "grid",
@@ -839,9 +882,9 @@ export default function CampaignsSection({
             gap: 14,
           }}
         >
-          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
             <h4 style={{ marginTop: 0 }}>
-              Dispositions — {activeCampaign?.name} ({dispositions.length})
+              🏷️ Dispositions — {activeCampaign?.name} ({dispositions.length})
             </h4>
             <form onSubmit={handleAddDisposition} style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
               <input
@@ -849,6 +892,7 @@ export default function CampaignsSection({
                 value={dispositionForm.name}
                 onChange={(e) => setDispositionForm((f) => ({ ...f, name: e.target.value }))}
                 required
+                style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
               />
               <label style={{ fontSize: 12 }}>
                 <input
@@ -860,7 +904,9 @@ export default function CampaignsSection({
                 />{" "}
                 Follow-up
               </label>
-              <button type="submit">Add</button>
+              <button type="submit" style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}>
+                Add
+              </button>
             </form>
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
               {dispositions.map((d) => (
@@ -871,9 +917,9 @@ export default function CampaignsSection({
             </ul>
           </div>
 
-          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+          <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
             <h4 style={{ marginTop: 0 }}>
-              Project Call Fields — {activeCampaign?.name} ({callFields.length})
+              🧩 Project Call Fields — {activeCampaign?.name} ({callFields.length})
             </h4>
             <form onSubmit={handleAddCallField} style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
               <input
@@ -881,16 +927,20 @@ export default function CampaignsSection({
                 value={fieldForm.label}
                 onChange={(e) => setFieldForm((f) => ({ ...f, label: e.target.value }))}
                 required
+                style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
               />
               <select
                 value={fieldForm.field_type}
                 onChange={(e) => setFieldForm((f) => ({ ...f, field_type: e.target.value }))}
+                style={{ padding: "6px 8px", borderRadius: 6 }}
               >
                 <option value="text">Text</option>
                 <option value="number">Number</option>
                 <option value="date">Date</option>
               </select>
-              <button type="submit">Add</button>
+              <button type="submit" style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}>
+                Add
+              </button>
             </form>
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
               {callFields.map((cf) => (
@@ -906,26 +956,30 @@ export default function CampaignsSection({
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(3, minmax(160px, 1fr))",
+              gridTemplateColumns: isAgent
+                ? "repeat(2, minmax(160px, 1fr))"
+                : "repeat(3, minmax(160px, 1fr))",
               gap: 10,
               marginBottom: 14,
             }}
           >
-            <button
-              type="button"
-              onClick={() => setCampaignView("members")}
-              style={{
-                padding: 12,
-                textAlign: "left",
-                borderRadius: 8,
-                border: campaignView === "members" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-                background: campaignView === "members" ? "#f1f5f9" : "#ffffff",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontSize: 12, color: "#475569" }}>Members</div>
-              <div style={{ fontSize: 20, fontWeight: "bold" }}>{assignedMemberIds.size}</div>
-            </button>
+            {!isAgent && (
+              <button
+                type="button"
+                onClick={() => setCampaignView("members")}
+                style={{
+                  padding: 12,
+                  textAlign: "left",
+                  borderRadius: 10,
+                  border: campaignView === "members" ? "2px solid #0f172a" : "1px solid #cbd5e1",
+                  background: campaignView === "members" ? "#f1f5f9" : "#ffffff",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ fontSize: 12, color: "#475569" }}>👥 Members</div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{assignedMemberIds.size}</div>
+              </button>
+            )}
 
             <button
               type="button"
@@ -933,16 +987,16 @@ export default function CampaignsSection({
               style={{
                 padding: 12,
                 textAlign: "left",
-                borderRadius: 8,
+                borderRadius: 10,
                 border: campaignView === "prospects" ? "2px solid #0f172a" : "1px solid #cbd5e1",
                 background: campaignView === "prospects" ? "#f1f5f9" : "#ffffff",
                 cursor: "pointer",
               }}
             >
               <div style={{ fontSize: 12, color: "#475569" }}>
-                Prospects ({unassignedCount} unassigned)
+                📇 Prospects {!isAgent ? `(${unassignedCount} unassigned)` : ""}
               </div>
-              <div style={{ fontSize: 20, fontWeight: "bold" }}>{campaignLeads.length}</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{campaignLeads.length}</div>
             </button>
 
             <button
@@ -951,19 +1005,19 @@ export default function CampaignsSection({
               style={{
                 padding: 12,
                 textAlign: "left",
-                borderRadius: 8,
+                borderRadius: 10,
                 border: campaignView === "pending_calls" ? "2px solid #0f172a" : "1px solid #cbd5e1",
                 background: campaignView === "pending_calls" ? "#f1f5f9" : "#ffffff",
                 cursor: "pointer",
               }}
             >
-              <div style={{ fontSize: 12, color: "#475569" }}>Pending Calls</div>
-              <div style={{ fontSize: 20, fontWeight: "bold" }}>{pendingCallLeads.length}</div>
+              <div style={{ fontSize: 12, color: "#475569" }}>📞 Pending Calls</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{pendingCallLeads.length}</div>
             </button>
           </div>
 
-          {campaignView === "members" ? (
-            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 16 }}>
+          {campaignView === "members" && !isAgent ? (
+            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, marginBottom: 16, background: "#ffffff" }}>
               <div
                 style={{
                   display: "flex",
@@ -987,12 +1041,14 @@ export default function CampaignsSection({
                     placeholder="Search user by name, email, role..."
                     value={memberSearch}
                     onChange={(e) => setMemberSearch(e.target.value)}
+                    style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
                   />
                   {canManageCampaign && (
                     <button
                       type="button"
                       onClick={handleDistributePendingLeadsEvenly}
                       disabled={distributingLeads || assignedMemberIds.size === 0}
+                      style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
                     >
                       {distributingLeads ? "Distributing..." : "Distribute Pending Leads"}
                     </button>
@@ -1002,7 +1058,7 @@ export default function CampaignsSection({
 
               <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
-                  <tr>
+                  <tr style={{ background: "#f1f5f9" }}>
                     <th>Name</th>
                     <th>Email</th>
                     <th>Role</th>
@@ -1028,6 +1084,7 @@ export default function CampaignsSection({
                             type="button"
                             disabled={!canManageCampaign || savingMemberId === u.id}
                             onClick={() => handleToggleCampaignMember(u.id, isAssigned)}
+                            style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
                           >
                             {savingMemberId === u.id
                               ? "Saving..."
@@ -1049,8 +1106,8 @@ export default function CampaignsSection({
             </div>
           ) : (
             <div>
-              {campaignView === "prospects" && (
-                <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 16 }}>
+              {campaignView === "prospects" && !isAgent && (
+                <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, marginBottom: 16, background: "#ffffff" }}>
                   <div
                     style={{
                       display: "flex",
@@ -1061,26 +1118,44 @@ export default function CampaignsSection({
                       marginBottom: 12,
                     }}
                   >
-                    <h4 style={{ margin: 0 }}>Add Prospects — {activeCampaign?.name}</h4>
+                    <h4 style={{ margin: 0 }}>📥 Add Prospects — {activeCampaign?.name}</h4>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                       <button
                         type="button"
                         onClick={() => setIngestChannel("single")}
-                        style={{ fontWeight: ingestChannel === "single" ? "bold" : "normal" }}
+                        style={{
+                          fontWeight: ingestChannel === "single" ? 700 : 500,
+                          padding: "6px 10px",
+                          borderRadius: 6,
+                          border: "1px solid #cbd5e1",
+                          cursor: "pointer",
+                        }}
                       >
-                        1. Single Entry (Add New)
+                        1. Single Entry
                       </button>
                       <button
                         type="button"
                         onClick={() => setIngestChannel("csv")}
-                        style={{ fontWeight: ingestChannel === "csv" ? "bold" : "normal" }}
+                        style={{
+                          fontWeight: ingestChannel === "csv" ? 700 : 500,
+                          padding: "6px 10px",
+                          borderRadius: 6,
+                          border: "1px solid #cbd5e1",
+                          cursor: "pointer",
+                        }}
                       >
                         2. CSV Import
                       </button>
                       <button
                         type="button"
                         onClick={() => setIngestChannel("api")}
-                        style={{ fontWeight: ingestChannel === "api" ? "bold" : "normal" }}
+                        style={{
+                          fontWeight: ingestChannel === "api" ? 700 : 500,
+                          padding: "6px 10px",
+                          borderRadius: 6,
+                          border: "1px solid #cbd5e1",
+                          cursor: "pointer",
+                        }}
                       >
                         3. API-to-Lead
                       </button>
@@ -1146,7 +1221,7 @@ export default function CampaignsSection({
                         value={leadForm.notes}
                         onChange={(e) => setLeadForm((f) => ({ ...f, notes: e.target.value }))}
                       />
-                      <button type="submit" style={{ fontWeight: "bold" }}>
+                      <button type="submit" style={{ fontWeight: 700, padding: "7px 12px", borderRadius: 6, cursor: "pointer" }}>
                         Save Prospect
                       </button>
                     </form>
@@ -1155,14 +1230,11 @@ export default function CampaignsSection({
                   {ingestChannel === "csv" && (
                     <div>
                       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <input
-                          type="file"
-                          accept=".csv,text/csv"
-                          onChange={handleCsvFileChange}
-                        />
+                        <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
                         <button
                           type="button"
                           onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
+                          style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
                         >
                           Download Sample CSV
                         </button>
@@ -1170,7 +1242,7 @@ export default function CampaignsSection({
 
                       {csvHeaders.length > 0 && (
                         <form onSubmit={handleImportMappedRows} style={{ marginTop: 12, display: "grid", gap: 8 }}>
-                          <div style={{ fontSize: 13, fontWeight: "bold" }}>
+                          <div style={{ fontSize: 13, fontWeight: 700 }}>
                             Step 2 — Map Columns ({csvRawRows.length} rows ready; deduplicates by phone in campaign):
                           </div>
                           {csvHeaders.map((h) => {
@@ -1218,7 +1290,19 @@ export default function CampaignsSection({
                             );
                           })}
                           <div>
-                            <button type="submit" disabled={importingRows} style={{ fontWeight: "bold", padding: "6px 14px" }}>
+                            <button
+                              type="submit"
+                              disabled={importingRows}
+                              style={{
+                                fontWeight: 700,
+                                padding: "7px 14px",
+                                borderRadius: 6,
+                                border: "1px solid #15803d",
+                                background: "#16a34a",
+                                color: "#ffffff",
+                                cursor: "pointer",
+                              }}
+                            >
                               {importingRows ? "Importing..." : "Run Import & Deduplicate"}
                             </button>
                           </div>
@@ -1228,10 +1312,10 @@ export default function CampaignsSection({
                       {importSummary && (
                         <div style={{ marginTop: 14 }}>
                           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dcfce7", color: "#166534", fontSize: 12, fontWeight: "bold" }}>
+                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dcfce7", color: "#166534", fontSize: 12, fontWeight: 700 }}>
                               Created ({importSummary.created})
                             </span>
-                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dbeafe", color: "#1e40af", fontSize: 12, fontWeight: "bold" }}>
+                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dbeafe", color: "#1e40af", fontSize: 12, fontWeight: 700 }}>
                               Updated ({importSummary.updated})
                             </span>
                             <button
@@ -1244,7 +1328,7 @@ export default function CampaignsSection({
                                 color: "#991b1b",
                                 border: "1px solid #fca5a5",
                                 fontSize: 12,
-                                fontWeight: "bold",
+                                fontWeight: 700,
                                 cursor: "pointer",
                               }}
                             >
@@ -1287,7 +1371,7 @@ export default function CampaignsSection({
                         value={apiTestPayload}
                         onChange={(e) => setApiTestPayload(e.target.value)}
                       />
-                      <button type="submit" style={{ width: "fit-content" }}>
+                      <button type="submit" style={{ width: "fit-content", padding: "6px 12px", borderRadius: 6, cursor: "pointer" }}>
                         Send Test Lead to Campaign API
                       </button>
                     </form>
@@ -1300,7 +1384,8 @@ export default function CampaignsSection({
                   style={{
                     padding: 12,
                     border: "1px solid #cbd5e1",
-                    borderRadius: 8,
+                    borderRadius: 10,
+                    background: "#f8fafc",
                     marginBottom: 12,
                     display: "flex",
                     justifyContent: "space-between",
@@ -1310,7 +1395,7 @@ export default function CampaignsSection({
                   }}
                 >
                   <div>
-                    <strong>Pending Calls Queue — {activeCampaign?.name}</strong>{" "}
+                    <strong>📞 Pending Calls Queue — {activeCampaign?.name}</strong>{" "}
                     <span style={{ fontSize: 13, color: "#475569" }}>
                       ({filteredLeads.length} matching of {pendingCallLeads.length} pending)
                     </span>
@@ -1320,16 +1405,16 @@ export default function CampaignsSection({
                       type="button"
                       onClick={() => onDialLead(filteredLeads[0])}
                       style={{
-                        padding: "7px 14px",
-                        fontWeight: "bold",
-                        background: "#166534",
+                        padding: "8px 16px",
+                        fontWeight: 700,
+                        background: "#16a34a",
                         color: "#ffffff",
-                        border: "none",
-                        borderRadius: 6,
+                        border: "1px solid #15803d",
+                        borderRadius: 8,
                         cursor: "pointer",
                       }}
                     >
-                      Start Calling ({filteredLeads[0].name})
+                      📞 Start Calling ({filteredLeads[0].name})
                     </button>
                   )}
                 </div>
@@ -1337,9 +1422,9 @@ export default function CampaignsSection({
 
               <div
                 style={{
-                  padding: 10,
+                  padding: 12,
                   border: "1px solid #cbd5e1",
-                  borderRadius: 8,
+                  borderRadius: 10,
                   background: "#f8fafc",
                   marginBottom: 12,
                   display: "grid",
@@ -1359,17 +1444,19 @@ export default function CampaignsSection({
                     <option value="closed">closed</option>
                   </select>
 
-                  <select
-                    value={filters.source}
-                    onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}
-                  >
-                    <option value="all">All Sources</option>
-                    <option value="manual">manual</option>
-                    <option value="csv_import">csv_import</option>
-                    <option value="api">api</option>
-                  </select>
+                  {!isAgent && (
+                    <select
+                      value={filters.source}
+                      onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}
+                    >
+                      <option value="all">All Sources</option>
+                      <option value="manual">manual</option>
+                      <option value="csv_import">csv_import</option>
+                      <option value="api">api</option>
+                    </select>
+                  )}
 
-                  {teamUsers.length > 0 && (
+                  {!isAgent && teamUsers.length > 0 && (
                     <select
                       value={filters.assignedTo}
                       onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
@@ -1407,24 +1494,28 @@ export default function CampaignsSection({
                     ))}
                   </select>
 
-                  <select
-                    value={filters.paramKey}
-                    onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
-                  >
-                    <option value="">Parameter Filter</option>
-                    {paramOptions.map((po) => (
-                      <option key={po.key} value={po.key}>
-                        {po.label}
-                      </option>
-                    ))}
-                  </select>
+                  {!isAgent && (
+                    <>
+                      <select
+                        value={filters.paramKey}
+                        onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
+                      >
+                        <option value="">Parameter Filter</option>
+                        {paramOptions.map((po) => (
+                          <option key={po.key} value={po.key}>
+                            {po.label}
+                          </option>
+                        ))}
+                      </select>
 
-                  <input
-                    placeholder="Parameter value"
-                    value={filters.paramValue}
-                    onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
-                    style={{ width: 140 }}
-                  />
+                      <input
+                        placeholder="Parameter value"
+                        value={filters.paramValue}
+                        onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
+                        style={{ width: 140 }}
+                      />
+                    </>
+                  )}
 
                   <input
                     placeholder="Search name / phone..."
@@ -1434,20 +1525,20 @@ export default function CampaignsSection({
                   />
                 </div>
 
-                {/* Lead Allocation / Transfer Bar (Selected Checkboxes + Bulk Filtered) */}
-                {canManageCampaign && teamUsers.length > 0 && (
+                {/* Lead Allocation / Transfer Bar for Managers & Supervisors */}
+                {!isAgent && canManageCampaign && teamUsers.length > 0 && (
                   <div
                     style={{
                       display: "flex",
                       gap: 8,
                       flexWrap: "wrap",
                       alignItems: "center",
-                      paddingTop: 6,
+                      paddingTop: 8,
                       borderTop: "1px dashed #cbd5e1",
                     }}
                   >
-                    <span style={{ fontSize: 12, fontWeight: "bold" }}>
-                      Allocate / Transfer ({activeSelectionIds.length} selected / {filteredLeads.length} filtered):
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a" }}>
+                      🔀 Allocate / Transfer ({activeSelectionIds.length} selected / {filteredLeads.length} filtered):
                     </span>
 
                     <button
@@ -1459,10 +1550,7 @@ export default function CampaignsSection({
                     </button>
 
                     {activeSelectionIds.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setSelectedLeadIds([])}
-                      >
+                      <button type="button" onClick={() => setSelectedLeadIds([])}>
                         Clear Selection
                       </button>
                     )}
@@ -1489,7 +1577,15 @@ export default function CampaignsSection({
                           "Selected allocation"
                         )
                       }
-                      style={{ fontWeight: "bold" }}
+                      style={{
+                        fontWeight: 700,
+                        padding: "5px 10px",
+                        borderRadius: 6,
+                        border: "1px solid #1d4ed8",
+                        background: "#2563eb",
+                        color: "#ffffff",
+                        cursor: "pointer",
+                      }}
                     >
                       {allocatingLeads
                         ? "Allocating..."
@@ -1506,6 +1602,7 @@ export default function CampaignsSection({
                           "Bulk filtered allocation"
                         )
                       }
+                      style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
                     >
                       Allocate All Filtered ({filteredLeads.length})
                     </button>
@@ -1514,6 +1611,7 @@ export default function CampaignsSection({
                       type="button"
                       disabled={distributingLeads || assignedMemberIds.size === 0}
                       onClick={handleDistributePendingLeadsEvenly}
+                      style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}
                     >
                       {distributingLeads
                         ? "Distributing..."
@@ -1524,50 +1622,54 @@ export default function CampaignsSection({
                   </div>
                 )}
 
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <span style={{ fontSize: 12, fontWeight: "bold" }}>
-                    Bulk ({activeSelectionIds.length > 0 ? `${activeSelectionIds.length} selected` : `${filteredLeads.length} filtered`}):
-                  </span>
-                  <input
-                    type="datetime-local"
-                    value={bulkFollowUpAt}
-                    onChange={(e) => setBulkFollowUpAt(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleBulkSetFollowUp}
-                    disabled={!bulkFollowUpAt || (activeSelectionIds.length === 0 && filteredLeads.length === 0)}
-                  >
-                    Bulk Set Follow-Up
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleBulkDeleteFiltered}
-                    disabled={activeSelectionIds.length === 0 && filteredLeads.length === 0}
-                    style={{ color: "#991b1b" }}
-                  >
-                    {activeSelectionIds.length > 0
-                      ? `Delete Selected (${activeSelectionIds.length})`
-                      : `Delete Filtered (${filteredLeads.length})`}
-                  </button>
-                </div>
+                {!isAgent && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: 12, fontWeight: 700 }}>
+                      Bulk ({activeSelectionIds.length > 0 ? `${activeSelectionIds.length} selected` : `${filteredLeads.length} filtered`}):
+                    </span>
+                    <input
+                      type="datetime-local"
+                      value={bulkFollowUpAt}
+                      onChange={(e) => setBulkFollowUpAt(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleBulkSetFollowUp}
+                      disabled={!bulkFollowUpAt || (activeSelectionIds.length === 0 && filteredLeads.length === 0)}
+                    >
+                      Bulk Set Follow-Up
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleBulkDeleteFiltered}
+                      disabled={activeSelectionIds.length === 0 && filteredLeads.length === 0}
+                      style={{ color: "#991b1b" }}
+                    >
+                      {activeSelectionIds.length > 0
+                        ? `Delete Selected (${activeSelectionIds.length})`
+                        : `Delete Filtered (${filteredLeads.length})`}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
-                  <tr>
-                    <th style={{ width: 34, textAlign: "center" }}>
-                      <input
-                        type="checkbox"
-                        checked={allFilteredSelected}
-                        onChange={toggleSelectAllFiltered}
-                        aria-label="Select all filtered leads"
-                      />
-                    </th>
+                  <tr style={{ background: "#f1f5f9" }}>
+                    {!isAgent && (
+                      <th style={{ width: 34, textAlign: "center" }}>
+                        <input
+                          type="checkbox"
+                          checked={allFilteredSelected}
+                          onChange={toggleSelectAllFiltered}
+                          aria-label="Select all filtered leads"
+                        />
+                      </th>
+                    )}
                     <th>Customer</th>
                     <th>Phone</th>
-                    <th>Source</th>
-                    <th>Assigned To</th>
+                    {!isAgent && <th>Source</th>}
+                    {!isAgent && <th>Assigned To</th>}
                     <th>Parameters</th>
                     <th>Status</th>
                     <th>Last Disposition</th>
@@ -1581,40 +1683,44 @@ export default function CampaignsSection({
                     const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
                     const isChecked = selectedIdSet.has(l.id);
                     return (
-                      <tr key={l.id} style={{ background: isChecked ? "#f0f9ff" : "transparent" }}>
-                        <td style={{ textAlign: "center" }}>
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => toggleRowSelection(l.id)}
-                            aria-label={`Select ${l.name}`}
-                          />
-                        </td>
+                      <tr key={l.id} style={{ background: isChecked ? "#eff6ff" : "#ffffff" }}>
+                        {!isAgent && (
+                          <td style={{ textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleRowSelection(l.id)}
+                              aria-label={`Select ${l.name}`}
+                            />
+                          </td>
+                        )}
                         <td>
                           <strong>{l.name}</strong>
                           {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
                         </td>
-                        <td>{l.phone}</td>
-                        <td><code>{l.source || "manual"}</code></td>
-                        <td>
-                          {teamUsers.length > 0 ? (
-                            <select
-                              value={l.assigned_to || ""}
-                              onChange={(e) =>
-                                handleUpdateLead(l.id, { assigned_to: e.target.value || null })
-                              }
-                            >
-                              <option value="">Unassigned</option>
-                              {teamUsers.map((u) => (
-                                <option key={u.id} value={u.id}>
-                                  {u.full_name || u.email} ({u.role})
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            userNameMap[l.assigned_to] || "Unassigned"
-                          )}
-                        </td>
+                        <td><strong>{l.phone}</strong></td>
+                        {!isAgent && <td><code>{l.source || "manual"}</code></td>}
+                        {!isAgent && (
+                          <td>
+                            {teamUsers.length > 0 ? (
+                              <select
+                                value={l.assigned_to || ""}
+                                onChange={(e) =>
+                                  handleUpdateLead(l.id, { assigned_to: e.target.value || null })
+                                }
+                              >
+                                <option value="">Unassigned</option>
+                                {teamUsers.map((u) => (
+                                  <option key={u.id} value={u.id}>
+                                    {u.full_name || u.email} ({u.role})
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              userNameMap[l.assigned_to] || "Unassigned"
+                            )}
+                          </td>
+                        )}
                         <td>
                           {entries.length > 0
                             ? entries.map(([k, v]) => (
@@ -1666,15 +1772,16 @@ export default function CampaignsSection({
                               type="button"
                               onClick={() => onDialLead(l)}
                               style={{
-                                padding: "5px 10px",
-                                background: "#166534",
+                                padding: "6px 12px",
+                                fontWeight: 700,
+                                background: "#16a34a",
                                 color: "#ffffff",
-                                border: "none",
-                                borderRadius: 4,
+                                border: "1px solid #15803d",
+                                borderRadius: 6,
                                 cursor: "pointer",
                               }}
                             >
-                              Call
+                              📞 Call
                             </button>
                           </td>
                         )}
@@ -1683,7 +1790,9 @@ export default function CampaignsSection({
                   })}
                   {filteredLeads.length === 0 && (
                     <tr>
-                      <td colSpan={onDialLead ? "10" : "9"}>No leads match the selected filters.</td>
+                      <td colSpan={isAgent ? (onDialLead ? "7" : "6") : onDialLead ? "10" : "9"}>
+                        No leads match the selected filters.
+                      </td>
                     </tr>
                   )}
                 </tbody>
@@ -1695,3 +1804,6 @@ export default function CampaignsSection({
     </section>
   );
 }
+```[cite: 2]
+
+Would you like to share any other files (`TenantsSection.jsx`, `TeamSection.jsx`, or an API route) for a final check before pushing to Vercel?
