@@ -34,7 +34,7 @@ function LicensePeriodBadge({ period }) {
         padding: "2px 8px",
         borderRadius: 999,
         fontSize: 11,
-        fontWeight: "bold",
+        fontWeight: 700,
         ...styles,
       }}
     >
@@ -114,7 +114,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to create tenant.");
+      onNotify?.(res.data?.error || "Failed to create tenant.");
       return;
     }
 
@@ -127,8 +127,8 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
       admin_password: "",
     });
     setShowCreateTenant(false);
-    onNotify(`Created tenant "${res.data.tenant?.name || ""}".`);
-    await onReload();
+    onNotify?.(`Created tenant "${res.data.tenant?.name || ""}".`);
+    await onReload?.();
   }
 
   function openSeatBlockEditor(tenant) {
@@ -166,15 +166,15 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to add seat block.");
+      onNotify?.(res.data?.error || "Failed to add seat block.");
       return;
     }
 
-    onNotify(
+    onNotify?.(
       `Added ${seatBlockForm.seat_count} seat(s) to "${seatBlockTarget.name}". Active seats now: ${res.data.active_seats}.`
     );
     setSeatBlockTarget(null);
-    await onReload();
+    await onReload?.();
   }
 
   async function handleEndSeatBlock(tenantId, periodId) {
@@ -193,12 +193,12 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to end seat block.");
+      onNotify?.(res.data?.error || "Failed to end seat block.");
       return;
     }
 
-    onNotify(`Seat block ended. Active seats now: ${res.data.active_seats}.`);
-    await onReload();
+    onNotify?.(`Seat block ended. Active seats now: ${res.data.active_seats}.`);
+    await onReload?.();
   }
 
   async function handleToggleTenantState(tenant) {
@@ -219,12 +219,12 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to update tenant state.");
+      onNotify?.(res.data?.error || "Failed to update tenant state.");
       return;
     }
 
-    onNotify(`Tenant "${tenant.name}" (#${tenant.numeric_id}) is now ${nextState}.`);
-    await onReload();
+    onNotify?.(`Tenant "${tenant.name}" (#${tenant.numeric_id}) is now ${nextState}.`);
+    await onReload?.();
   }
 
   async function handleDeleteTenant(tenantId) {
@@ -246,12 +246,12 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to delete tenant.");
+      onNotify?.(res.data?.error || "Failed to delete tenant.");
       return;
     }
 
-    onNotify("Tenant deleted.");
-    await onReload();
+    onNotify?.("Tenant deleted.");
+    await onReload?.();
   }
 
   return (
@@ -267,15 +267,23 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
         }}
       >
         <h3 style={{ margin: 0 }}>
-          Tenants & Licenses ({filteredTenants.length} of {(tenants || []).length})
+          🏢 Tenants & Licenses ({filteredTenants.length} of {(tenants || []).length})
         </h3>
         {profile?.role === "super_admin" && (
           <button
             type="button"
             onClick={() => setShowCreateTenant((prev) => !prev)}
-            style={{ padding: "7px 12px", fontWeight: "bold", cursor: "pointer" }}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid #5b21b6",
+              background: "#6d28d9",
+              color: "#ffffff",
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
           >
-            {showCreateTenant ? "Close Create Form" : "+ Create Tenant"}
+            {showCreateTenant ? "✕ Close Create Form" : "➕ Create Tenant"}
           </button>
         )}
       </div>
@@ -287,25 +295,29 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
           flexWrap: "wrap",
           alignItems: "center",
           marginBottom: 16,
-          padding: 10,
+          padding: 12,
           background: "#f8fafc",
           border: "1px solid #cbd5e1",
-          borderRadius: 6,
+          borderRadius: 10,
         }}
       >
         <input
           placeholder="Filter by ID (e.g. 1, 2)"
           value={filterId}
           onChange={(e) => setFilterId(e.target.value)}
-          style={{ width: 150, padding: 6 }}
+          style={{ width: 150, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
         />
         <input
           placeholder="Filter by tenant name..."
           value={filterName}
           onChange={(e) => setFilterName(e.target.value)}
-          style={{ width: 220, padding: 6 }}
+          style={{ width: 220, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
         />
-        <select value={filterState} onChange={(e) => setFilterState(e.target.value)} style={{ padding: 6 }}>
+        <select
+          value={filterState}
+          onChange={(e) => setFilterState(e.target.value)}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
+        >
           <option value="all">All States</option>
           <option value="active">Active</option>
           <option value="disabled">Disabled / Expired</option>
@@ -318,6 +330,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
               setFilterName("");
               setFilterState("all");
             }}
+            style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
           >
             Clear Filters
           </button>
@@ -325,14 +338,23 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
       </div>
 
       {profile?.role === "super_admin" && showCreateTenant && (
-        <div style={{ marginBottom: 24, padding: 14, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <h4 style={{ marginTop: 0 }}>Create Customer Tenant & Initial Seat Block</h4>
+        <div
+          style={{
+            marginBottom: 24,
+            padding: 14,
+            border: "1px solid #cbd5e1",
+            borderRadius: 10,
+            background: "#ffffff",
+          }}
+        >
+          <h4 style={{ marginTop: 0 }}>➕ Create Customer Tenant & Initial Seat Block</h4>
           <form onSubmit={handleCreateTenant} style={{ display: "grid", gap: 8, maxWidth: 480 }}>
             <input
               placeholder="Company / Tenant Name"
               value={tenantForm.tenant_name}
               onChange={(e) => setTenantForm((f) => ({ ...f, tenant_name: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -342,7 +364,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
                 value={tenantForm.max_licenses}
                 onChange={(e) => setTenantForm((f) => ({ ...f, max_licenses: e.target.value }))}
                 required
-                style={{ flex: 1 }}
+                style={{ flex: 1, padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
               />
               <input
                 type="number"
@@ -350,7 +372,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
                 placeholder="Duration Months (e.g. 1 or 6)"
                 value={tenantForm.duration_months}
                 onChange={(e) => setTenantForm((f) => ({ ...f, duration_months: e.target.value }))}
-                style={{ flex: 1 }}
+                style={{ flex: 1, padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
               />
             </div>
             <input
@@ -358,6 +380,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
               value={tenantForm.admin_name}
               onChange={(e) => setTenantForm((f) => ({ ...f, admin_name: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <input
               type="email"
@@ -365,6 +388,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
               value={tenantForm.admin_email}
               onChange={(e) => setTenantForm((f) => ({ ...f, admin_email: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
             <input
               type="password"
@@ -372,8 +396,22 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
               value={tenantForm.admin_password}
               onChange={(e) => setTenantForm((f) => ({ ...f, admin_password: e.target.value }))}
               required
+              style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
-            <button type="submit">Create Tenant & Admin</button>
+            <button
+              type="submit"
+              style={{
+                padding: "8px 14px",
+                borderRadius: 6,
+                border: "1px solid #15803d",
+                background: "#16a34a",
+                color: "#ffffff",
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Create Tenant & Admin
+            </button>
           </form>
         </div>
       )}
@@ -384,16 +422,16 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
             marginBottom: 24,
             padding: 14,
             border: "1px solid #334155",
-            borderRadius: 8,
+            borderRadius: 10,
             background: "#f8fafc",
             maxWidth: 520,
           }}
         >
           <h4 style={{ marginTop: 0 }}>
-            Add Time-Bound Seat Block — #{seatBlockTarget.numeric_id} {seatBlockTarget.name}
+            🪑 Add Time-Bound Seat Block — #{seatBlockTarget.numeric_id} {seatBlockTarget.name}
           </h4>
           <form onSubmit={handleAddSeatBlock} style={{ display: "grid", gap: 8 }}>
-            <label style={{ fontSize: 12 }}>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>
               Additional Seats:
               <input
                 type="number"
@@ -401,48 +439,65 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
                 value={seatBlockForm.seat_count}
                 onChange={(e) => setSeatBlockForm((f) => ({ ...f, seat_count: e.target.value }))}
                 required
-                style={{ width: "100%", marginTop: 2 }}
+                style={{ width: "100%", marginTop: 2, padding: "6px 8px", borderRadius: 6 }}
               />
             </label>
-            <label style={{ fontSize: 12 }}>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>
               Duration (Months, if End Date is left blank):
               <input
                 type="number"
                 min="0"
                 value={seatBlockForm.duration_months}
                 onChange={(e) => setSeatBlockForm((f) => ({ ...f, duration_months: e.target.value }))}
-                style={{ width: "100%", marginTop: 2 }}
+                style={{ width: "100%", marginTop: 2, padding: "6px 8px", borderRadius: 6 }}
               />
             </label>
-            <label style={{ fontSize: 12 }}>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>
               Custom Start Date/Time (optional):
               <input
                 type="datetime-local"
                 value={seatBlockForm.starts_at}
                 onChange={(e) => setSeatBlockForm((f) => ({ ...f, starts_at: e.target.value }))}
-                style={{ width: "100%", marginTop: 2 }}
+                style={{ width: "100%", marginTop: 2, padding: "6px 8px", borderRadius: 6 }}
               />
             </label>
-            <label style={{ fontSize: 12 }}>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>
               Custom End Date/Time (optional):
               <input
                 type="datetime-local"
                 value={seatBlockForm.ends_at}
                 onChange={(e) => setSeatBlockForm((f) => ({ ...f, ends_at: e.target.value }))}
-                style={{ width: "100%", marginTop: 2 }}
+                style={{ width: "100%", marginTop: 2, padding: "6px 8px", borderRadius: 6 }}
               />
             </label>
-            <label style={{ fontSize: 12 }}>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>
               Reason / Plan Note:
               <input
                 value={seatBlockForm.reason}
                 onChange={(e) => setSeatBlockForm((f) => ({ ...f, reason: e.target.value }))}
-                style={{ width: "100%", marginTop: 2 }}
+                style={{ width: "100%", marginTop: 2, padding: "6px 8px", borderRadius: 6 }}
               />
             </label>
             <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-              <button type="submit">Save Seat Block</button>
-              <button type="button" onClick={() => setSeatBlockTarget(null)}>
+              <button
+                type="submit"
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 6,
+                  border: "1px solid #15803d",
+                  background: "#16a34a",
+                  color: "#ffffff",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Save Seat Block
+              </button>
+              <button
+                type="button"
+                onClick={() => setSeatBlockTarget(null)}
+                style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
+              >
                 Cancel
               </button>
             </div>
@@ -450,9 +505,9 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
         </div>
       )}
 
-      <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse" }}>
+      <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
-          <tr>
+          <tr style={{ background: "#f1f5f9" }}>
             <th>ID</th>
             <th>Tenant</th>
             <th>State</th>
@@ -464,6 +519,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
         <tbody>
           {filteredTenants.map((t) => {
             const stateLabel = t.effective_state || t.status || "active";
+            const isDisabled = stateLabel === "disabled";
             return (
               <Fragment key={t.id}>
                 <tr>
@@ -477,42 +533,55 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
                     <code style={{ fontSize: 11, color: "#64748b" }}>{t.id}</code>
                   </td>
                   <td>
-                    <strong>{stateLabel}</strong>
+                    <span
+                      style={{
+                        display: "inline-block",
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        background: isDisabled ? "#fee2e2" : "#dcfce7",
+                        color: isDisabled ? "#991b1b" : "#166534",
+                        border: isDisabled ? "1px solid #fca5a5" : "1px solid #86efac",
+                      }}
+                    >
+                      {stateLabel}
+                    </span>
                     {t.license_expired && (
-                      <div style={{ color: "#b91c1c", fontSize: 11 }}>
+                      <div style={{ color: "#b91c1c", fontSize: 11, marginTop: 3 }}>
                         License finished / 0 active seats
                       </div>
                     )}
                     {t.over_capacity > 0 && (
-                      <div style={{ color: "#b91c1c", fontSize: 11, fontWeight: "bold" }}>
+                      <div style={{ color: "#b91c1c", fontSize: 11, fontWeight: 700, marginTop: 3 }}>
                         Over seat limit by {t.over_capacity}
                       </div>
                     )}
                   </td>
                   <td>
-                    {t.used_licenses} / {t.max_licenses}
+                    <strong>{t.used_licenses}</strong> / {t.max_licenses}
                   </td>
-                  <td>{t.remaining_licenses}</td>
+                  <td><strong>{t.remaining_licenses}</strong></td>
                   <td>
                     <button
                       type="button"
                       onClick={() => openSeatBlockEditor(t)}
-                      style={{ marginRight: 6 }}
+                      style={{ marginRight: 6, padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
                       + Add Seat Block
                     </button>
                     <button
                       type="button"
                       onClick={() => handleToggleTenantState(t)}
-                      style={{ marginRight: 6 }}
+                      style={{ marginRight: 6, padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
-                      {stateLabel === "disabled" ? "Enable Tenant" : "Disable Tenant"}
+                      {isDisabled ? "Enable Tenant" : "Disable Tenant"}
                     </button>
                     {profile?.role === "super_admin" && (
                       <button
                         type="button"
                         onClick={() => handleDeleteTenant(t.id)}
-                        style={{ marginRight: 6 }}
+                        style={{ marginRight: 6, padding: "4px 8px", borderRadius: 6, color: "#991b1b", cursor: "pointer" }}
                       >
                         Delete
                       </button>
@@ -520,6 +589,7 @@ export default function TenantsSection({ session, profile, tenants, onReload, on
                     <button
                       type="button"
                       onClick={() => setExpandedTenantId((cur) => (cur === t.id ? null : t.id))}
+                      style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
                       {expandedTenantId === t.id ? "Hide History" : "History"}
                     </button>
