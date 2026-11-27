@@ -722,6 +722,16 @@ export default function CampaignsSection({
     await onReloadAll?.();
   }
 
+  async function copyTextToClipboard(text, successMsg) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      onNotify?.(successMsg);
+    } catch {
+      onNotify?.("Clipboard copy failed. Copy manually from the box above.");
+    }
+  }
+
   const canManageCampaign = [
     "super_admin",
     "admin",
@@ -735,6 +745,20 @@ export default function CampaignsSection({
   const campaignIngestUrl = selectedProjectId
     ? `${origin}/api/campaigns/${selectedProjectId}/ingest`
     : "/api/campaigns/<campaign_id>/ingest";
+
+  const compactJsonBody = useMemo(() => {
+    try {
+      return JSON.stringify(JSON.parse(apiTestPayload));
+    } catch {
+      return apiTestPayload.replace(/\s+/g, " ").trim();
+    }
+  }, [apiTestPayload]);
+
+  const curlCommand = useMemo(
+    () =>
+      `curl --location --request POST '${campaignIngestUrl}' --header 'Content-Type: application/json' --data-raw '${compactJsonBody}'`,
+    [campaignIngestUrl, compactJsonBody]
+  );
 
   const activeSelectionIds =
     visibleSelectedIds.length > 0 ? visibleSelectedIds : selectedLeadIds;
@@ -1361,99 +1385,93 @@ export default function CampaignsSection({
                     </div>
                   )}
 
-                 {ingestChannel === "api" && (
-  <div style={{ display: "grid", gap: 10, maxWidth: 680 }}>
-    <div
-      style={{
-        padding: 10,
-        borderRadius: 8,
-        background: "#f8fafc",
-        border: "1px solid #cbd5e1",
-        fontSize: 12,
-      }}
-    >
-      <div style={{ fontWeight: 700, marginBottom: 4 }}>
-        Project-Specific POST Endpoint ({activeCampaign?.name || "Selected Project"}):
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <code style={{ wordBreak: "break-all" }}>POST {campaignIngestUrl}</code>
-        <button
-          type="button"
-          onClick={async () => {
-            if (!selectedProjectId) {
-              onNotify?.("Select a campaign first.");
-              return;
-            }
-            try {
-              await navigator.clipboard.writeText(campaignIngestUrl);
-              onNotify?.("Copied campaign endpoint URL.");
-            } catch {
-              onNotify?.("Could not copy endpoint URL automatically.");
-            }
-          }}
-          style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
-        >
-          📋 Copy URL
-        </button>
-        <button
-          type="button"
-          onClick={async () => {
-            if (!selectedProjectId) {
-              onNotify?.("Select a campaign first.");
-              return;
-            }
-            const compactBody = apiTestPayload.replace(/\s+/g, " ").trim();
-            const curlCmd = `curl -X POST '${campaignIngestUrl}' -H 'Content-Type: application/json' -d '${compactBody}'`;
-            try {
-              await navigator.clipboard.writeText(curlCmd);
-              onNotify?.("Copied POST cURL command for this campaign.");
-            } catch {
-              onNotify?.("Could not copy cURL command automatically.");
-            }
-          }}
-          style={{
-            padding: "4px 10px",
-            borderRadius: 6,
-            border: "1px solid #1d4ed8",
-            background: "#2563eb",
-            color: "#ffffff",
-            fontWeight: 700,
-            cursor: "pointer",
-          }}
-        >
-          📋 Copy cURL (POST)
-        </button>
-      </div>
-    </div>
+                  {ingestChannel === "api" && (
+                    <div style={{ display: "grid", gap: 10, maxWidth: 680 }}>
+                      <div
+                        style={{
+                          padding: 10,
+                          borderRadius: 8,
+                          background: "#f8fafc",
+                          border: "1px solid #cbd5e1",
+                          fontSize: 12,
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                          Unique Campaign POST Endpoint ({activeCampaign?.name || "Selected Campaign"}):
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <code style={{ wordBreak: "break-all" }}>POST {campaignIngestUrl}</code>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyTextToClipboard(
+                                campaignIngestUrl,
+                                "Copied unique campaign POST URL."
+                              )
+                            }
+                            style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
+                          >
+                            📋 Copy URL
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyTextToClipboard(
+                                curlCommand,
+                                "Copied POST cURL command for this campaign."
+                              )
+                            }
+                            style={{
+                              padding: "4px 10px",
+                              borderRadius: 6,
+                              border: "1px solid #1d4ed8",
+                              background: "#2563eb",
+                              color: "#ffffff",
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            📋 Copy cURL (POST)
+                          </button>
+                        </div>
+                      </div>
 
-    <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap: 8 }}>
-      <label style={{ fontSize: 12, fontWeight: 600 }}>
-        Sample JSON Payload (sent via <code>POST</code>):
-      </label>
-      <textarea
-        rows={5}
-        value={apiTestPayload}
-        onChange={(e) => setApiTestPayload(e.target.value)}
-        style={{ padding: 8, borderRadius: 6, border: "1px solid #cbd5e1", fontFamily: "monospace", fontSize: 12 }}
-      />
-      <button
-        type="submit"
-        style={{
-          width: "fit-content",
-          padding: "6px 12px",
-          borderRadius: 6,
-          border: "1px solid #15803d",
-          background: "#16a34a",
-          color: "#ffffff",
-          fontWeight: 700,
-          cursor: "pointer",
-        }}
-      >
-        ▶ Send Test Lead to This Campaign
-      </button>
-    </form>
-  </div>
-)}
+                      <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap: 8 }}>
+                        <label style={{ fontSize: 12, fontWeight: 600 }}>
+                          JSON Body (used by both Test button and Copy cURL):
+                        </label>
+                        <textarea
+                          rows={5}
+                          value={apiTestPayload}
+                          onChange={(e) => setApiTestPayload(e.target.value)}
+                          style={{
+                            padding: 8,
+                            borderRadius: 6,
+                            border: "1px solid #cbd5e1",
+                            fontFamily: "monospace",
+                            fontSize: 12,
+                          }}
+                        />
+                        <button
+                          type="submit"
+                          style={{
+                            width: "fit-content",
+                            padding: "6px 12px",
+                            borderRadius: 6,
+                            border: "1px solid #15803d",
+                            background: "#16a34a",
+                            color: "#ffffff",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          ▶ Send Test Lead to This Campaign
+                        </button>
+                      </form>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {campaignView === "pending_calls" && (
                 <div
