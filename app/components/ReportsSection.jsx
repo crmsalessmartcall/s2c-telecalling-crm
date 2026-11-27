@@ -20,38 +20,44 @@ export default function ReportsSection({ reportData }) {
       : {};
   const recentCalls = Array.isArray(reportData?.recent_calls) ? reportData.recent_calls : [];
 
+  const cards = [
+    { label: "Total Calls", value: summary.total_calls, icon: "📞", bg: "#eff6ff", border: "#bfdbfe" },
+    { label: "Connected Calls", value: summary.connected_calls, icon: "✅", bg: "#f0fdf4", border: "#bbf7d0" },
+    { label: "Avg Duration", value: `${summary.avg_duration_seconds}s`, icon: "⏱️", bg: "#faf5ff", border: "#e9d5ff" },
+    { label: "Total Leads", value: summary.total_leads, icon: "👥", bg: "#f8fafc", border: "#cbd5e1" },
+    { label: "Follow-Ups Scheduled", value: summary.scheduled_followups, icon: "⏰", bg: "#fffbeb", border: "#fde68a" },
+  ];
+
   return (
     <section>
-      <h3>Call & Conversion Reports</h3>
+      <h3 style={{ marginTop: 0 }}>📈 Call & Conversion Reports</h3>
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))",
           gap: 12,
           marginBottom: 20,
         }}
       >
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#64748b" }}>Total Calls</div>
-          <strong style={{ fontSize: 20 }}>{summary.total_calls}</strong>
-        </div>
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#64748b" }}>Connected Calls</div>
-          <strong style={{ fontSize: 20 }}>{summary.connected_calls}</strong>
-        </div>
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#64748b" }}>Avg Duration</div>
-          <strong style={{ fontSize: 20 }}>{summary.avg_duration_seconds}s</strong>
-        </div>
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#64748b" }}>Total Leads</div>
-          <strong style={{ fontSize: 20 }}>{summary.total_leads}</strong>
-        </div>
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#64748b" }}>Follow-Ups Scheduled</div>
-          <strong style={{ fontSize: 20 }}>{summary.scheduled_followups}</strong>
-        </div>
+        {cards.map((c) => (
+          <div
+            key={c.label}
+            style={{
+              padding: 14,
+              border: `1px solid ${c.border}`,
+              borderRadius: 10,
+              background: c.bg,
+            }}
+          >
+            <div style={{ fontSize: 12, color: "#475569", fontWeight: 600 }}>
+              {c.icon} {c.label}
+            </div>
+            <strong style={{ fontSize: 22, color: "#0f172a", display: "block", marginTop: 4 }}>
+              {c.value}
+            </strong>
+          </div>
+        ))}
       </div>
 
       <div
@@ -62,8 +68,8 @@ export default function ReportsSection({ reportData }) {
           marginBottom: 20,
         }}
       >
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <h4 style={{ marginTop: 0 }}>Calls by Disposition</h4>
+        <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
+          <h4 style={{ marginTop: 0 }}>🏷️ Calls by Disposition</h4>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
             {Object.entries(dispositions).map(([k, v]) => (
               <li key={k}>
@@ -74,8 +80,8 @@ export default function ReportsSection({ reportData }) {
           </ul>
         </div>
 
-        <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <h4 style={{ marginTop: 0 }}>Leads by Status</h4>
+        <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 10, background: "#ffffff" }}>
+          <h4 style={{ marginTop: 0 }}>📌 Leads by Status</h4>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
             {Object.entries(leadStatuses).map(([k, v]) => (
               <li key={k}>
@@ -87,10 +93,10 @@ export default function ReportsSection({ reportData }) {
         </div>
       </div>
 
-      <h4>Recent Call Activity</h4>
+      <h4>🕘 Recent Call Activity</h4>
       <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
-          <tr>
+          <tr style={{ background: "#f1f5f9" }}>
             <th>Time</th>
             <th>Phone</th>
             <th>Provider</th>
@@ -104,7 +110,7 @@ export default function ReportsSection({ reportData }) {
           {recentCalls.map((c) => (
             <tr key={c.id}>
               <td>{c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</td>
-              <td>{c.phone}</td>
+              <td><strong>{c.phone}</strong></td>
               <td>{c.provider || "smartcall"}</td>
               <td>{c.status}</td>
               <td>{c.disposition || "-"}</td>
