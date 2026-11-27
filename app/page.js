@@ -17,16 +17,13 @@ const ROLE_ACCESS = {
     "Reports",
     "Campaigns",
     "Follow-Ups",
-    "Transactions",
     "Settings / Rules",
-    "Campaigns & Leads",
     "Dialer",
   ],
   admin: [
     "Reports",
     "Campaigns",
     "Follow-Ups",
-    "Transactions",
     "Settings / Rules",
     "Team & Licenses",
   ],
@@ -34,7 +31,6 @@ const ROLE_ACCESS = {
     "Reports",
     "Campaigns",
     "Follow-Ups",
-    "Transactions",
     "Settings / Rules",
   ],
   platform_ops: ["Tenants & Licenses", "Reports"],
@@ -43,30 +39,24 @@ const ROLE_ACCESS = {
     "Reports",
     "Campaigns",
     "Follow-Ups",
-    "Transactions",
     "Settings / Rules",
-    "Campaigns & Leads",
     "Dialer",
   ],
   supervisor: [
     "Reports",
     "Campaigns",
     "Follow-Ups",
-    "Transactions",
     "Settings / Rules",
-    "Campaigns & Leads",
     "Dialer",
   ],
   team_leader: [
     "Reports",
     "Campaigns",
     "Follow-Ups",
-    "Transactions",
     "Settings / Rules",
-    "Campaigns & Leads",
     "Dialer",
   ],
-  agent: ["Campaigns", "Dialer", "Follow-Ups", "Transactions"],
+  agent: ["Campaigns", "Dialer", "Follow-Ups"],
 };
 
 const DEFAULT_LANDING_TAB = {
@@ -79,6 +69,17 @@ const DEFAULT_LANDING_TAB = {
   team_leader: "Reports",
   agent: "Campaigns",
 };
+
+function dedupeById(items = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items || []) {
+    if (!item?.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
 
 export default function HomePage() {
   const [session, setSession] = useState(null);
@@ -142,7 +143,7 @@ export default function HomePage() {
   }, [profile, campaignMembers, leads]);
 
   const activeProjects = useMemo(() => {
-    const base = (projects || []).filter((p) => {
+    const base = dedupeById(projects || []).filter((p) => {
       const st = String(p.status || "active").toLowerCase();
       return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
     });
@@ -157,9 +158,10 @@ export default function HomePage() {
   }, [projects, profile, assignedCampaignIdsForAgent, campaignMembers]);
 
   const scopedLeads = useMemo(() => {
-    if (profile?.role !== "agent" || !profile?.id) return leads || [];
+    const uniqueLeads = dedupeById(leads || []);
+    if (profile?.role !== "agent" || !profile?.id) return uniqueLeads;
     const allowedIds = assignedCampaignIdsForAgent;
-    return (leads || []).filter((l) => {
+    return uniqueLeads.filter((l) => {
       if (l.assigned_to === profile.id) return true;
       if (allowedIds && allowedIds.size > 0 && l.project_id) {
         return allowedIds.has(l.project_id);
@@ -167,6 +169,8 @@ export default function HomePage() {
       return true;
     });
   }, [leads, profile, assignedCampaignIdsForAgent]);
+
+  const scopedCallLogs = useMemo(() => dedupeById(callLogs || []), [callLogs]);
 
   async function loadCampaignMembers(currentProfile) {
     try {
@@ -176,7 +180,7 @@ export default function HomePage() {
       }
       const { data, error } = await query;
       if (!error && Array.isArray(data)) {
-        setCampaignMembers(data);
+        setCampaignMembers(dedupeById(data));
       }
     } catch {
       // Table may not be created yet before SQL migration runs
@@ -199,17 +203,17 @@ export default function HomePage() {
     ]);
 
     if (cfgRes.ok) {
-      setCallFields(cfgRes.data.call_fields || []);
-      setDispositions(cfgRes.data.dispositions || []);
+      setCallFields(dedupeById(cfgRes.data.call_fields || []));
+      setDispositions(dedupeById(cfgRes.data.dispositions || []));
     }
-    if (leadsRes.ok) setLeads(leadsRes.data.leads || []);
-    if (callsRes.ok) setCallLogs(callsRes.data.calls || []);
+    if (leadsRes.ok) setLeads(dedupeById(leadsRes.data.leads || []));
+    if (callsRes.ok) setCallLogs(dedupeById(callsRes.data.calls || []));
     if (repRes.ok) {
       setReportData((prev) => ({
         summary: repRes.data.summary || prev.summary,
         dispositions: repRes.data.dispositions || {},
         lead_statuses: repRes.data.lead_statuses || {},
-        recent_calls: repRes.data.recent_calls || [],
+        recent_calls: dedupeById(repRes.data.recent_calls || []),
       }));
     }
   }
@@ -236,7 +240,7 @@ export default function HomePage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (tRes.ok) {
-        const list = tRes.data.tenants || [];
+        const list = dedupeById(tRes.data.tenants || []);
         setTenants(list);
         if (role === "super_admin" && !tenantScope && list[0]?.id) {
           setSelectedTenantScope(list[0].id);
@@ -254,8 +258,8 @@ export default function HomePage() {
       if (uRes.ok) {
         const activeSeats = uRes.data.active_seats ?? uRes.data.tenant?.max_licenses ?? 0;
         const used = uRes.data.used_licenses ?? 0;
-        setTeamUsers(uRes.data.users || []);
-        setTenantLicenseHistory(uRes.data.license_periods || []);
+        setTeamUsers(dedupeById(uRes.data.users || []));
+        setTenantLicenseHistory(dedupeById(uRes.data.license_periods || []));
         setLicenseInfo({
           used,
           max: activeSeats,
@@ -273,7 +277,7 @@ export default function HomePage() {
           : "/api/projects";
       const pRes = await safeJsonFetch(pUrl, { headers: { Authorization: `Bearer ${token}` } });
       if (pRes.ok) {
-        const allProj = pRes.data.projects || [];
+        const allProj = dedupeById(pRes.data.projects || []);
         setProjectsCountAll(allProj.length);
         const onlyActive = allProj.filter((p) => {
           const st = String(p.status || "active").toLowerCase();
@@ -301,7 +305,7 @@ export default function HomePage() {
           summary: repRes.data.summary || prev.summary,
           dispositions: repRes.data.dispositions || {},
           lead_statuses: repRes.data.lead_statuses || {},
-          recent_calls: repRes.data.recent_calls || [],
+          recent_calls: dedupeById(repRes.data.recent_calls || []),
         }));
       }
     }
@@ -419,8 +423,8 @@ export default function HomePage() {
     );
   }
 
-  const isCampaignTab = ["Campaigns", "Campaigns & Leads", "Settings / Rules"].includes(activeTab);
-  const isDialerTab = ["Dialer", "Transactions"].includes(activeTab);
+  const isCampaignTab = ["Campaigns", "Settings / Rules"].includes(activeTab);
+  const isDialerTab = activeTab === "Dialer";
 
   return (
     <div style={{ maxWidth: 1220, margin: "24px auto", padding: 16, fontFamily: "sans-serif" }}>
@@ -541,9 +545,8 @@ export default function HomePage() {
           leads={scopedLeads}
           callFields={callFields}
           dispositions={dispositions}
-          callLogs={callLogs}
+          callLogs={scopedCallLogs}
           initialDialLead={dialLeadRequest}
-          initialViewMode={activeTab === "Transactions" ? "transactions" : "dialer"}
           onClearInitialDialLead={() => setDialLeadRequest(null)}
           onReload={() => loadRoleData(session, profile)}
           onNotify={setStatusMessage}
