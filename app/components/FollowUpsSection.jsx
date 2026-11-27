@@ -195,64 +195,64 @@ export default function FollowUpsSection({
           marginBottom: 14,
         }}
       >
-        <h3 style={{ margin: 0 }}>Scheduled Follow-Ups ({scheduledFollowUps.length})</h3>
+        <h3 style={{ margin: 0 }}>⏰ Scheduled Follow-Ups ({scheduledFollowUps.length})</h3>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             type="button"
             onClick={() => setTimingFilter(timingFilter === "overdue" ? "all" : "overdue")}
             style={{
-              padding: "4px 10px",
-              borderRadius: 6,
+              padding: "5px 12px",
+              borderRadius: 999,
               border: timingFilter === "overdue" ? "2px solid #991b1b" : "1px solid #fca5a5",
               background: "#fef2f2",
               color: "#991b1b",
               fontSize: 12,
-              fontWeight: "bold",
+              fontWeight: 700,
               cursor: "pointer",
             }}
           >
-            Overdue: {timingCounts.overdue}
+            🚨 Overdue: {timingCounts.overdue}
           </button>
           <button
             type="button"
             onClick={() => setTimingFilter(timingFilter === "today" ? "all" : "today")}
             style={{
-              padding: "4px 10px",
-              borderRadius: 6,
+              padding: "5px 12px",
+              borderRadius: 999,
               border: timingFilter === "today" ? "2px solid #92400e" : "1px solid #fcd34d",
               background: "#fffbeb",
               color: "#92400e",
               fontSize: 12,
-              fontWeight: "bold",
+              fontWeight: 700,
               cursor: "pointer",
             }}
           >
-            Due Today: {timingCounts.today}
+            📅 Due Today: {timingCounts.today}
           </button>
           <button
             type="button"
             onClick={() => setTimingFilter(timingFilter === "upcoming" ? "all" : "upcoming")}
             style={{
-              padding: "4px 10px",
-              borderRadius: 6,
+              padding: "5px 12px",
+              borderRadius: 999,
               border: timingFilter === "upcoming" ? "2px solid #166534" : "1px solid #86efac",
               background: "#f0fdf4",
               color: "#166534",
               fontSize: 12,
-              fontWeight: "bold",
+              fontWeight: 700,
               cursor: "pointer",
             }}
           >
-            Upcoming: {timingCounts.upcoming}
+            🗓️ Upcoming: {timingCounts.upcoming}
           </button>
         </div>
       </div>
 
       <div
         style={{
-          padding: 10,
+          padding: 12,
           border: "1px solid #cbd5e1",
-          borderRadius: 8,
+          borderRadius: 10,
           background: "#f8fafc",
           marginBottom: 14,
           display: "flex",
@@ -261,7 +261,11 @@ export default function FollowUpsSection({
           alignItems: "center",
         }}
       >
-        <select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)}>
+        <select
+          value={projectFilter}
+          onChange={(e) => setProjectFilter(e.target.value)}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
+        >
           <option value="">All Active Campaigns</option>
           {(activeProjects || []).map((p) => (
             <option key={p.id} value={p.id}>
@@ -270,14 +274,22 @@ export default function FollowUpsSection({
           ))}
         </select>
 
-        <select value={timingFilter} onChange={(e) => setTimingFilter(e.target.value)}>
+        <select
+          value={timingFilter}
+          onChange={(e) => setTimingFilter(e.target.value)}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
+        >
           <option value="all">All Follow-Up Times</option>
           <option value="overdue">Overdue</option>
           <option value="today">Due Today</option>
           <option value="upcoming">Upcoming</option>
         </select>
 
-        <select value={dispositionFilter} onChange={(e) => setDispositionFilter(e.target.value)}>
+        <select
+          value={dispositionFilter}
+          onChange={(e) => setDispositionFilter(e.target.value)}
+          style={{ padding: "6px 8px", borderRadius: 6 }}
+        >
           <option value="all">All Dispositions</option>
           <option value="__none__">No Disposition</option>
           {(dispositions || []).map((d) => (
@@ -291,7 +303,7 @@ export default function FollowUpsSection({
           placeholder="Search name, phone, email, notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 220, padding: 5 }}
+          style={{ width: 220, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
         />
 
         {(projectFilter || timingFilter !== "all" || dispositionFilter !== "all" || search) && (
@@ -303,6 +315,7 @@ export default function FollowUpsSection({
               setDispositionFilter("all");
               setSearch("");
             }}
+            style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
           >
             Reset
           </button>
@@ -311,7 +324,7 @@ export default function FollowUpsSection({
 
       <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
-          <tr>
+          <tr style={{ background: "#f1f5f9" }}>
             <th>Lead</th>
             <th>Phone</th>
             <th>Campaign</th>
@@ -328,24 +341,43 @@ export default function FollowUpsSection({
               draftTimes[l.id] !== undefined ? draftTimes[l.id] : formatLocalInput(l.follow_up_at);
 
             return (
-              <tr key={l.id}>
+              <tr key={l.id} style={{ background: isOverdue ? "#fffafa" : "#ffffff" }}>
                 <td>
                   <strong>{l.name}</strong>
                   {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
                   {l.notes && <div style={{ fontSize: 11, color: "#475569" }}>{l.notes}</div>}
                 </td>
-                <td>{l.phone}</td>
+                <td>
+                  <strong>{l.phone}</strong>
+                </td>
                 <td>{projectNameById[l.project_id] || "-"}</td>
-                <td>{l.disposition || "-"}</td>
+                <td>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      background: "#eff6ff",
+                      color: "#1e40af",
+                      border: "1px solid #bfdbfe",
+                    }}
+                  >
+                    {l.disposition || "No Disposition"}
+                  </span>
+                </td>
                 <td>
                   <div
                     style={{
                       fontSize: 11,
+                      fontWeight: 700,
                       marginBottom: 4,
                       color: isOverdue ? "#b91c1c" : "#166534",
                     }}
                   >
-                    {new Date(l.follow_up_at).toLocaleString()} {isOverdue ? "(Overdue)" : ""}
+                    {isOverdue ? "🚨 Overdue: " : "🕒 Scheduled: "}
+                    {new Date(l.follow_up_at).toLocaleString()}
                   </div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                     <input
@@ -354,11 +386,13 @@ export default function FollowUpsSection({
                       onChange={(e) =>
                         setDraftTimes((prev) => ({ ...prev, [l.id]: e.target.value }))
                       }
+                      style={{ padding: "4px 6px", borderRadius: 6 }}
                     />
                     <button
                       type="button"
                       disabled={savingId === l.id}
                       onClick={() => handleSaveReschedule(l)}
+                      style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
                       {savingId === l.id ? "Saving..." : "Save Time"}
                     </button>
@@ -368,6 +402,7 @@ export default function FollowUpsSection({
                       onClick={() =>
                         handleSaveReschedule(l, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
                       }
+                      style={{ padding: "4px 8px", borderRadius: 6, cursor: "pointer" }}
                     >
                       +24h
                     </button>
@@ -377,17 +412,33 @@ export default function FollowUpsSection({
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     <button
                       type="button"
-                      style={{ fontWeight: "bold" }}
+                      style={{
+                        fontWeight: 700,
+                        padding: "6px 10px",
+                        borderRadius: 6,
+                        border: "1px solid #15803d",
+                        background: "#16a34a",
+                        color: "#ffffff",
+                        cursor: "pointer",
+                      }}
                       onClick={() => onDialLead?.(l)}
                     >
-                      Dial Now
+                      📞 Dial Now
                     </button>
                     <button
                       type="button"
                       disabled={savingId === l.id}
                       onClick={() => handleCompleteFollowUp(l)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 6,
+                        border: "1px solid #cbd5e1",
+                        background: "#f8fafc",
+                        color: "#0f172a",
+                        cursor: "pointer",
+                      }}
                     >
-                      Complete
+                      ✓ Complete
                     </button>
                   </div>
                 </td>
