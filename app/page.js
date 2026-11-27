@@ -12,12 +12,72 @@ import DialerSection from "@/app/components/DialerSection";
 import ReportsSection from "@/app/components/ReportsSection";
 
 const ROLE_ACCESS = {
-  super_admin: ["Tenants & Licenses", "Campaigns & Leads", "Dialer", "Follow-Ups", "Reports"],
+  super_admin: [
+    "Tenants & Licenses",
+    "Reports",
+    "Campaigns",
+    "Follow-Ups",
+    "Transactions",
+    "Settings / Rules",
+    "Campaigns & Leads",
+    "Dialer",
+  ],
+  admin: [
+    "Reports",
+    "Campaigns",
+    "Follow-Ups",
+    "Transactions",
+    "Settings / Rules",
+    "Team & Licenses",
+  ],
+  manager: [
+    "Reports",
+    "Campaigns",
+    "Follow-Ups",
+    "Transactions",
+    "Settings / Rules",
+  ],
   platform_ops: ["Tenants & Licenses", "Reports"],
-  tenant_admin: ["Team & Licenses", "Campaigns & Leads", "Dialer", "Follow-Ups", "Reports"],
-  supervisor: ["Campaigns & Leads", "Dialer", "Follow-Ups", "Reports"],
-  team_leader: ["Campaigns & Leads", "Dialer", "Follow-Ups", "Reports"],
-  agent: ["Dialer", "Campaigns & Leads", "Follow-Ups"],
+  tenant_admin: [
+    "Team & Licenses",
+    "Reports",
+    "Campaigns",
+    "Follow-Ups",
+    "Transactions",
+    "Settings / Rules",
+    "Campaigns & Leads",
+    "Dialer",
+  ],
+  supervisor: [
+    "Reports",
+    "Campaigns",
+    "Follow-Ups",
+    "Transactions",
+    "Settings / Rules",
+    "Campaigns & Leads",
+    "Dialer",
+  ],
+  team_leader: [
+    "Reports",
+    "Campaigns",
+    "Follow-Ups",
+    "Transactions",
+    "Settings / Rules",
+    "Campaigns & Leads",
+    "Dialer",
+  ],
+  agent: ["Campaigns", "Dialer", "Follow-Ups", "Transactions"],
+};
+
+const DEFAULT_LANDING_TAB = {
+  super_admin: "Tenants & Licenses",
+  admin: "Reports",
+  manager: "Reports",
+  platform_ops: "Tenants & Licenses",
+  tenant_admin: "Team & Licenses",
+  supervisor: "Reports",
+  team_leader: "Reports",
+  agent: "Campaigns",
 };
 
 export default function HomePage() {
@@ -42,6 +102,7 @@ export default function HomePage() {
 
   const [projects, setProjects] = useState([]);
   const [projectsCountAll, setProjectsCountAll] = useState(0);
+  const [campaignMembers, setCampaignMembers] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [callFields, setCallFields] = useState([]);
   const [dispositions, setDispositions] = useState([]);
@@ -61,16 +122,66 @@ export default function HomePage() {
     recent_calls: [],
   });
 
-  const allowedTabs = profile?.role ? ROLE_ACCESS[profile.role] || ["Dialer"] : [];
+  const allowedTabs = profile?.role
+    ? ROLE_ACCESS[profile.role] || ["Campaigns", "Dialer", "Follow-Ups"]
+    : [];
 
-  const activeProjects = useMemo(
-    () =>
-      (projects || []).filter((p) => {
-        const st = String(p.status || "active").toLowerCase();
-        return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
-      }),
-    [projects]
-  );
+  const assignedCampaignIdsForAgent = useMemo(() => {
+    if (profile?.role !== "agent" || !profile?.id) return null;
+    const ids = new Set(
+      (campaignMembers || [])
+        .filter((m) => m.user_id === profile.id)
+        .map((m) => m.campaign_id)
+    );
+    for (const l of leads || []) {
+      if (l.assigned_to === profile.id && l.project_id) {
+        ids.add(l.project_id);
+      }
+    }
+    return ids;
+  }, [profile, campaignMembers, leads]);
+
+  const activeProjects = useMemo(() => {
+    const base = (projects || []).filter((p) => {
+      const st = String(p.status || "active").toLowerCase();
+      return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
+    });
+
+    if (profile?.role === "agent" && assignedCampaignIdsForAgent) {
+      if (assignedCampaignIdsForAgent.size === 0 && (campaignMembers || []).length === 0) {
+        return base;
+      }
+      return base.filter((p) => assignedCampaignIdsForAgent.has(p.id));
+    }
+    return base;
+  }, [projects, profile, assignedCampaignIdsForAgent, campaignMembers]);
+
+  const scopedLeads = useMemo(() => {
+    if (profile?.role !== "agent" || !profile?.id) return leads || [];
+    const allowedIds = assignedCampaignIdsForAgent;
+    return (leads || []).filter((l) => {
+      if (l.assigned_to === profile.id) return true;
+      if (allowedIds && allowedIds.size > 0 && l.project_id) {
+        return allowedIds.has(l.project_id);
+      }
+      return true;
+    });
+  }, [leads, profile, assignedCampaignIdsForAgent]);
+
+  async function loadCampaignMembers(currentProfile) {
+    try {
+      let query = supabase.from("campaign_members").select("*");
+      if (currentProfile?.tenant_id) {
+        query = query.eq("tenant_id", currentProfile.tenant_id);
+      }
+      const { data, error } = await query;
+      if (!error && Array.isArray(data)) {
+        setCampaignMembers(data);
+      }
+    } catch {
+      // Table may not be created yet before SQL migration runs
+    }
+  }
 
   async function loadCampaignAndLeadsData(token, currentProfile, projectId = "", tenantScope = "") {
     const params = new URLSearchParams();
@@ -94,23 +205,31 @@ export default function HomePage() {
     if (leadsRes.ok) setLeads(leadsRes.data.leads || []);
     if (callsRes.ok) setCallLogs(callsRes.data.calls || []);
     if (repRes.ok) {
-      setReportData({
-        summary: repRes.data.summary || reportData.summary,
+      setReportData((prev) => ({
+        summary: repRes.data.summary || prev.summary,
         dispositions: repRes.data.dispositions || {},
         lead_statuses: repRes.data.lead_statuses || {},
         recent_calls: repRes.data.recent_calls || [],
-      });
+      }));
     }
   }
 
-  async function loadRoleData(currentSession, currentProfile, overrideTenantScope = null) {
+  async function loadRoleData(
+    currentSession,
+    currentProfile,
+    overrideTenantScope = null,
+    forceLandingTab = false
+  ) {
     if (!currentSession?.access_token || !currentProfile?.role) return;
     const token = currentSession.access_token;
     const role = currentProfile.role;
     const tenantScope = overrideTenantScope !== null ? overrideTenantScope : selectedTenantScope;
 
-    const tabs = ROLE_ACCESS[role] || ["Dialer"];
-    setActiveTab((prev) => (tabs.includes(prev) ? prev : tabs[0]));
+    const tabs = ROLE_ACCESS[role] || ["Campaigns", "Dialer", "Follow-Ups"];
+    const landingTab = DEFAULT_LANDING_TAB[role] || tabs[0];
+    setActiveTab((prev) => (!forceLandingTab && prev && tabs.includes(prev) ? prev : landingTab));
+
+    await loadCampaignMembers(currentProfile);
 
     if (["super_admin", "platform_ops"].includes(role)) {
       const tRes = await safeJsonFetch("/api/admin/tenants", {
@@ -125,7 +244,10 @@ export default function HomePage() {
       }
     }
 
-    if (["tenant_admin", "supervisor", "team_leader"].includes(role) && currentProfile.tenant_id) {
+    if (
+      ["admin", "manager", "tenant_admin", "supervisor", "team_leader"].includes(role) &&
+      currentProfile.tenant_id
+    ) {
       const uRes = await safeJsonFetch("/api/tenant/users", {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -175,17 +297,17 @@ export default function HomePage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (repRes.ok) {
-        setReportData({
-          summary: repRes.data.summary || reportData.summary,
+        setReportData((prev) => ({
+          summary: repRes.data.summary || prev.summary,
           dispositions: repRes.data.dispositions || {},
           lead_statuses: repRes.data.lead_statuses || {},
           recent_calls: repRes.data.recent_calls || [],
-        });
+        }));
       }
     }
   }
 
-  async function hydrateSession() {
+  async function hydrateSession(forceLandingTab = false) {
     setLoading(true);
     setStatusMessage("");
     try {
@@ -224,7 +346,7 @@ export default function HomePage() {
 
       setSession(currentSession);
       setProfile(prof);
-      await loadRoleData(currentSession, prof);
+      await loadRoleData(currentSession, prof, null, forceLandingTab);
     } catch (err) {
       setStatusMessage(err?.message || "Failed to load session");
     } finally {
@@ -233,7 +355,7 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    hydrateSession();
+    hydrateSession(true);
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (!nextSession?.user) {
         setSession(null);
@@ -254,7 +376,7 @@ export default function HomePage() {
       setAuthError(error.message);
       return;
     }
-    await hydrateSession();
+    await hydrateSession(true);
   }
 
   if (loading) {
@@ -296,6 +418,9 @@ export default function HomePage() {
       </div>
     );
   }
+
+  const isCampaignTab = ["Campaigns", "Campaigns & Leads", "Settings / Rules"].includes(activeTab);
+  const isDialerTab = ["Dialer", "Transactions"].includes(activeTab);
 
   return (
     <div style={{ maxWidth: 1220, margin: "24px auto", padding: 16, fontFamily: "sans-serif" }}>
@@ -339,23 +464,26 @@ export default function HomePage() {
           />
         )}
 
-      {activeTab === "Team & Licenses" && profile.role === "tenant_admin" && (
-        <TeamSection
-          session={session}
-          profile={profile}
-          teamUsers={teamUsers}
-          licenseInfo={licenseInfo}
-          tenantLicenseHistory={tenantLicenseHistory}
-          onReload={() => loadRoleData(session, profile)}
-          onNotify={setStatusMessage}
-        />
-      )}
+      {activeTab === "Team & Licenses" &&
+        ["admin", "tenant_admin"].includes(profile.role) && (
+          <TeamSection
+            session={session}
+            profile={profile}
+            teamUsers={teamUsers}
+            licenseInfo={licenseInfo}
+            tenantLicenseHistory={tenantLicenseHistory}
+            onReload={() => loadRoleData(session, profile)}
+            onNotify={setStatusMessage}
+          />
+        )}
 
-      {activeTab === "Campaigns & Leads" && (
+      {isCampaignTab && (
         <CampaignsSection
           session={session}
           profile={profile}
           tenants={tenants}
+          teamUsers={teamUsers}
+          campaignMembers={campaignMembers}
           selectedTenantScope={selectedTenantScope}
           onChangeTenantScope={async (nextTenant) => {
             setSelectedTenantScope(nextTenant);
@@ -375,9 +503,14 @@ export default function HomePage() {
           projectsCountAll={projectsCountAll}
           callFields={callFields}
           dispositions={dispositions}
-          leads={leads}
+          leads={scopedLeads}
+          initialSubTab={activeTab === "Settings / Rules" ? "settings" : "calling_data"}
           onReloadAll={() => loadRoleData(session, profile)}
           onNotify={setStatusMessage}
+          onDialLead={(lead) => {
+            setDialLeadRequest(lead);
+            setActiveTab("Dialer");
+          }}
         />
       )}
 
@@ -387,7 +520,7 @@ export default function HomePage() {
           profile={profile}
           selectedTenantScope={selectedTenantScope}
           activeProjects={activeProjects}
-          leads={leads}
+          leads={scopedLeads}
           dispositions={dispositions}
           onReload={() => loadRoleData(session, profile)}
           onNotify={setStatusMessage}
@@ -398,18 +531,19 @@ export default function HomePage() {
         />
       )}
 
-      {activeTab === "Dialer" && (
+      {isDialerTab && (
         <DialerSection
           session={session}
           profile={profile}
           selectedTenantScope={selectedTenantScope}
           activeProjects={activeProjects}
           selectedProjectId={selectedProjectId}
-          leads={leads}
+          leads={scopedLeads}
           callFields={callFields}
           dispositions={dispositions}
           callLogs={callLogs}
           initialDialLead={dialLeadRequest}
+          initialViewMode={activeTab === "Transactions" ? "transactions" : "dialer"}
           onClearInitialDialLead={() => setDialLeadRequest(null)}
           onReload={() => loadRoleData(session, profile)}
           onNotify={setStatusMessage}
