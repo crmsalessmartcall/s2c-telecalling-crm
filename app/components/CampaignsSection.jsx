@@ -39,6 +39,8 @@ export default function CampaignsSection({
 }) {
   const [subTab, setSubTab] = useState(initialSubTab);
   const [campaignView, setCampaignView] = useState("prospects"); // "members" | "prospects" | "pending_calls"
+  const [ingestChannel, setIngestChannel] = useState("csv_excel"); // "single" | "csv_excel" | "email" | "api"
+
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
   const [fieldForm, setFieldForm] = useState({ label: "", field_type: "text" });
   const [dispositionForm, setDispositionForm] = useState({ name: "", requires_followup: false });
@@ -46,9 +48,11 @@ export default function CampaignsSection({
   const [savingMemberId, setSavingMemberId] = useState(null);
   const [distributingLeads, setDistributingLeads] = useState(false);
 
+  // Single Entry form (standard + serial_number + custom_fields)
   const [leadForm, setLeadForm] = useState({
     name: "",
     phone: "",
+    serial_number: "",
     email: "",
     notes: "",
     follow_up_at: "",
@@ -56,15 +60,34 @@ export default function CampaignsSection({
     custom_fields: {},
   });
 
+  // Bulk CSV / Excel state
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [csvRawRows, setCsvRawRows] = useState([]);
   const [columnMapping, setColumnMapping] = useState({});
+  const [importingRows, setImportingRows] = useState(false);
+
+  // Import Summary & Error Inspection state
+  const [importSummary, setImportSummary] = useState(null);
+  const [showErrorTable, setShowErrorTable] = useState(false);
+
+  // Email-to-Lead state
+  const [emailLeadForm, setEmailLeadForm] = useState({
+    from: "",
+    subject: "",
+    body: "",
+  });
+
+  // API-to-Lead test state
+  const [apiTestPayload, setApiTestPayload] = useState(
+    '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
+  );
 
   const [filters, setFilters] = useState({
     status: "all",
     disposition: "all",
     callKind: "all",
     assignedTo: "all",
+    source: "all",
     paramKey: "",
     paramValue: "",
     search: "",
@@ -113,9 +136,12 @@ export default function CampaignsSection({
   }, [teamUsers]);
 
   const paramOptions = useMemo(() => {
-    const opts = [{ key: "city", label: "City (city)" }];
+    const opts = [
+      { key: "serial_number", label: "Serial Number (serial_number)" },
+      { key: "city", label: "City (city)" },
+    ];
     for (const cf of callFields || []) {
-      if (cf.field_key && cf.field_key !== "city") {
+      if (cf.field_key && !["serial_number", "city"].includes(cf.field_key)) {
         opts.push({ key: cf.field_key, label: `${cf.label} (${cf.field_key})` });
       }
     }
@@ -126,6 +152,7 @@ export default function CampaignsSection({
     const baseList = campaignView === "pending_calls" ? pendingCallLeads : campaignLeads;
     return baseList.filter((lead) => {
       if (filters.status !== "all" && (lead.status || "new") !== filters.status) return false;
+      if (filters.source !== "all" && (lead.source || "manual") !== filters.source) return false;
 
       if (filters.assignedTo !== "all") {
         if (filters.assignedTo === "__unassigned__" && lead.assigned_to) return false;
@@ -189,6 +216,220 @@ export default function CampaignsSection({
     );
   }, [teamUsers, memberSearch]);
 
+  function applyAutoMapping(headers) {
+    const stdMap = {
+      name: "std:name",
+      customer_name: "std:name",
+      full_name: "std:name",
+      phone: "std:phone",
+      customer_number: "std:phone",
+      mobile: "std:phone",
+      email: "std:email",
+      serial_number: "std:serial_number",
+      notes: "std:notes",
+      follow_up_at: "std:follow_up_at",
+    };
+    const projectFieldKeys = new Set((callFields || []).map((f) => f.field_key));
+
+    const nextMap = {};
+    for (const h of headers) {
+      const norm = toKey(h);
+      if (stdMap[norm]) {
+        nextMap[h] = { target: stdMap[norm], newFieldName: h };
+      } else if (projectFieldKeys.has(norm)) {
+        nextMap[h] = { target: `custom:${norm}`, newFieldName: h };
+      } else {
+        nextMap[h] = { target: "new_field", newFieldName: h };
+      }
+    }
+    setColumnMapping(nextMap);
+  }
+
+  async function handleFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportSummary(null);
+    setShowErrorTable(false);
+
+    const fileName = String(file.name || "").toLowerCase();
+    const isExcel = fileName.endsWith(".xlsx") || fileName.endsWith(".xls");
+
+    if (!isExcel) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const parsed = parseCsvRows(String(reader.result || ""));
+        setCsvHeaders(parsed.headers);
+        setCsvRawRows(parsed.rows);
+        applyAutoMapping(parsed.headers);
+        onNotify(`Loaded ${parsed.rows.length} row(s) from "${file.name}". Map columns and import.`);
+      };
+      reader.readAsText(file);
+      return;
+    }
+
+    try {
+      const XLSX = await import("xlsx");
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: "" });
+      if (!Array.isArray(matrix) || matrix.length === 0) {
+        onNotify("Excel sheet is empty.");
+        return;
+      }
+
+      const headers = (matrix[0] || []).map((h, idx) => String(h || `Column_${idx + 1}`).trim());
+      const rows = matrix.slice(1).map((r) => {
+        const obj = {};
+        headers.forEach((h, i) => {
+          obj[h] = r[i] ?? "";
+        });
+        return obj;
+      });
+
+      setCsvHeaders(headers);
+      setCsvRawRows(rows);
+      applyAutoMapping(headers);
+      onNotify(`Loaded ${rows.length} Excel row(s) from "${file.name}". Map columns and import.`);
+    } catch {
+      onNotify('Excel (.xlsx/.xls) parsing requires the "xlsx" package, or upload a .csv file.');
+    }
+  }
+
+  async function handleImportMappedRows(e) {
+    e.preventDefault();
+    if (!session?.access_token || csvRawRows.length === 0) return;
+
+    setImportingRows(true);
+    try {
+      const newFields = [];
+      for (const h of csvHeaders) {
+        const mapEntry = columnMapping[h];
+        if (mapEntry?.target === "new_field") {
+          const cleanKey = toKey(mapEntry.newFieldName || h);
+          if (cleanKey) {
+            newFields.push({
+              field_key: cleanKey,
+              label: String(mapEntry.newFieldName || h).trim(),
+              field_type: "text",
+            });
+          }
+        }
+      }
+
+      const mappedRows = csvRawRows.map((rawRow, index) => {
+        const rowObj = { _row_number: index + 2, custom_fields: {} };
+        for (const h of csvHeaders) {
+          const val = rawRow[h];
+          const mapEntry = columnMapping[h] || { target: "ignore" };
+          if (mapEntry.target === "ignore") continue;
+
+          if (mapEntry.target.startsWith("std:")) {
+            const stdKey = mapEntry.target.replace("std:", "");
+            if (stdKey === "serial_number") {
+              if (val !== "") rowObj.custom_fields.serial_number = val;
+            } else {
+              rowObj[stdKey] = val;
+            }
+          } else if (mapEntry.target.startsWith("custom:")) {
+            const cKey = mapEntry.target.replace("custom:", "");
+            if (val !== "") rowObj.custom_fields[cKey] = val;
+          } else if (mapEntry.target === "new_field") {
+            const nKey = toKey(mapEntry.newFieldName || h);
+            if (nKey && val !== "") rowObj.custom_fields[nKey] = val;
+          }
+        }
+        return rowObj;
+      });
+
+      const res = await safeJsonFetch("/api/leads/upload", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          project_id: selectedProjectId || null,
+          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+          new_fields: newFields,
+          rows: mappedRows,
+        }),
+      });
+
+      if (!res.ok) {
+        onNotify(res.data?.error || "Failed to import mapped leads.");
+        return;
+      }
+
+      const created = res.data.created_count ?? res.data.uploaded_count ?? 0;
+      const updated = res.data.updated_count ?? 0;
+      const errs = Array.isArray(res.data.errors) ? res.data.errors : [];
+
+      setImportSummary({
+        created,
+        updated,
+        errors: errs,
+      });
+      setShowErrorTable(errs.length > 0);
+      setCsvHeaders([]);
+      setCsvRawRows([]);
+      setColumnMapping({});
+
+      onNotify(
+        `Import finished — Created: ${created}, Updated: ${updated}, Errors: ${errs.length}.`
+      );
+      await onReloadAll();
+    } finally {
+      setImportingRows(false);
+    }
+  }
+
+  async function handleEmailToLead(e) {
+    e.preventDefault();
+    const res = await safeJsonFetch("/api/leads/inbound-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: selectedProjectId || null,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        from: emailLeadForm.from,
+        subject: emailLeadForm.subject,
+        text: emailLeadForm.body,
+      }),
+    });
+    if (!res.ok) {
+      onNotify(res.data?.error || "Email-to-Lead failed.");
+      return;
+    }
+    setEmailLeadForm({ from: "", subject: "", body: "" });
+    onNotify(`Created Email lead "${res.data.lead?.name}" (${res.data.lead?.phone}).`);
+    await onReloadAll();
+  }
+
+  async function handleTestApiIngest(e) {
+    e.preventDefault();
+    if (!selectedProjectId) return;
+    let parsed = {};
+    try {
+      parsed = JSON.parse(apiTestPayload);
+    } catch {
+      onNotify("Invalid JSON payload for API-to-Lead test.");
+      return;
+    }
+
+    const res = await safeJsonFetch(`/api/campaigns/${encodeURIComponent(selectedProjectId)}/ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(parsed),
+    });
+    if (!res.ok) {
+      onNotify(res.data?.error || "API-to-Lead request failed.");
+      return;
+    }
+    onNotify(`API lead created: "${res.data.lead?.name}" (${res.data.lead?.phone}).`);
+    await onReloadAll();
+  }
+
   async function handleToggleCampaignMember(userId, currentlyAssigned) {
     if (!session?.access_token || !selectedProjectId || !userId) return;
     setSavingMemberId(userId);
@@ -206,12 +447,10 @@ export default function CampaignsSection({
           tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
         }),
       });
-
       if (!res.ok) {
         onNotify(res.data?.error || "Failed to update campaign member.");
         return;
       }
-
       onNotify(
         currentlyAssigned
           ? `Removed ${userNameMap[userId] || "member"} from campaign.`
@@ -256,103 +495,6 @@ export default function CampaignsSection({
     } finally {
       setDistributingLeads(false);
     }
-  }
-
-  function handleCsvFileChange(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const parsed = parseCsvRows(String(reader.result || ""));
-      setCsvHeaders(parsed.headers);
-      setCsvRawRows(parsed.rows);
-
-      const knownKeys = new Set(["name", "phone", "email", "notes", "follow_up_at"]);
-      const projectFieldKeys = new Set((callFields || []).map((f) => f.field_key));
-
-      const nextMap = {};
-      for (const h of parsed.headers) {
-        const norm = toKey(h);
-        if (knownKeys.has(norm)) {
-          nextMap[h] = { target: `std:${norm}`, newFieldName: h };
-        } else if (projectFieldKeys.has(norm)) {
-          nextMap[h] = { target: `custom:${norm}`, newFieldName: h };
-        } else {
-          nextMap[h] = { target: "new_field", newFieldName: h };
-        }
-      }
-      setColumnMapping(nextMap);
-      onNotify(`Loaded ${parsed.rows.length} CSV row(s) from "${file.name}". Map columns and import.`);
-    };
-    reader.readAsText(file);
-  }
-
-  async function handleImportMappedCsv(e) {
-    e.preventDefault();
-    if (!session?.access_token || csvRawRows.length === 0) return;
-
-    const newFields = [];
-    for (const h of csvHeaders) {
-      const mapEntry = columnMapping[h];
-      if (mapEntry?.target === "new_field") {
-        const cleanKey = toKey(mapEntry.newFieldName || h);
-        if (cleanKey) {
-          newFields.push({
-            field_key: cleanKey,
-            label: String(mapEntry.newFieldName || h).trim(),
-            field_type: "text",
-          });
-        }
-      }
-    }
-
-    const mappedRows = csvRawRows.map((rawRow) => {
-      const rowObj = { custom_fields: {} };
-      for (const h of csvHeaders) {
-        const val = rawRow[h];
-        const mapEntry = columnMapping[h] || { target: "ignore" };
-        if (mapEntry.target === "ignore") continue;
-
-        if (mapEntry.target.startsWith("std:")) {
-          const stdKey = mapEntry.target.replace("std:", "");
-          rowObj[stdKey] = val;
-        } else if (mapEntry.target.startsWith("custom:")) {
-          const cKey = mapEntry.target.replace("custom:", "");
-          if (val !== "") rowObj.custom_fields[cKey] = val;
-        } else if (mapEntry.target === "new_field") {
-          const nKey = toKey(mapEntry.newFieldName || h);
-          if (nKey && val !== "") rowObj.custom_fields[nKey] = val;
-        }
-      }
-      return rowObj;
-    });
-
-    const res = await safeJsonFetch("/api/leads/upload", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({
-        project_id: selectedProjectId || null,
-        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        new_fields: newFields,
-        rows: mappedRows,
-      }),
-    });
-
-    if (!res.ok) {
-      onNotify(res.data?.error || "Failed to upload mapped CSV leads.");
-      return;
-    }
-
-    setCsvHeaders([]);
-    setCsvRawRows([]);
-    setColumnMapping({});
-    onNotify(
-      `Imported ${res.data.uploaded_count || 0} lead(s) and created ${res.data.created_fields_count || 0} new project field(s).`
-    );
-    await onReloadAll();
   }
 
   async function handleCreateCampaign(e) {
@@ -436,6 +578,11 @@ export default function CampaignsSection({
   async function handleAddSingleLead(e) {
     e.preventDefault();
     if (!session?.access_token) return;
+    const mergedCustom = { ...leadForm.custom_fields };
+    if (leadForm.serial_number.trim()) {
+      mergedCustom.serial_number = leadForm.serial_number.trim();
+    }
+
     const res = await safeJsonFetch("/api/leads", {
       method: "POST",
       headers: {
@@ -443,8 +590,14 @@ export default function CampaignsSection({
         Authorization: `Bearer ${session.access_token}`,
       },
       body: JSON.stringify({
-        ...leadForm,
+        name: leadForm.name,
+        phone: leadForm.phone,
+        email: leadForm.email,
+        notes: leadForm.notes,
+        follow_up_at: leadForm.follow_up_at || null,
         assigned_to: leadForm.assigned_to || null,
+        source: "manual",
+        custom_fields: mergedCustom,
         project_id: selectedProjectId || null,
         tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
@@ -456,13 +609,14 @@ export default function CampaignsSection({
     setLeadForm({
       name: "",
       phone: "",
+      serial_number: "",
       email: "",
       notes: "",
       follow_up_at: "",
       assigned_to: "",
       custom_fields: {},
     });
-    onNotify(`Added lead "${res.data.lead?.name}".`);
+    onNotify(`Added prospect "${res.data.lead?.name}".`);
     await onReloadAll();
   }
 
@@ -532,9 +686,19 @@ export default function CampaignsSection({
     await onReloadAll();
   }
 
-  const canManageCampaign = ["super_admin", "admin", "manager", "tenant_admin", "supervisor", "team_leader"].includes(
-    profile?.role
-  );
+  const canManageCampaign = [
+    "super_admin",
+    "admin",
+    "manager",
+    "tenant_admin",
+    "supervisor",
+    "team_leader",
+  ].includes(profile?.role);
+
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const campaignIngestUrl = selectedProjectId
+    ? `${origin}/api/campaigns/${selectedProjectId}/ingest`
+    : "/api/campaigns/<campaign_id>/ingest";
 
   return (
     <section>
@@ -848,31 +1012,74 @@ export default function CampaignsSection({
           ) : (
             <div>
               {campaignView === "prospects" && (
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-                    gap: 12,
-                    marginBottom: 16,
-                  }}
-                >
-                  <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-                    <h4 style={{ marginTop: 0 }}>Add New Prospect — {activeCampaign?.name}</h4>
-                    <form onSubmit={handleAddSingleLead} style={{ display: "grid", gap: 8 }}>
+                <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 16 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <h4 style={{ margin: 0 }}>Add Prospects — {activeCampaign?.name}</h4>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => setIngestChannel("single")}
+                        style={{ fontWeight: ingestChannel === "single" ? "bold" : "normal" }}
+                      >
+                        1. Single Entry (Add New)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIngestChannel("csv_excel")}
+                        style={{ fontWeight: ingestChannel === "csv_excel" ? "bold" : "normal" }}
+                      >
+                        2. CSV / Excel Import
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIngestChannel("email")}
+                        style={{ fontWeight: ingestChannel === "email" ? "bold" : "normal" }}
+                      >
+                        3. Email-to-Lead
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIngestChannel("api")}
+                        style={{ fontWeight: ingestChannel === "api" ? "bold" : "normal" }}
+                      >
+                        4. API-to-Lead
+                      </button>
+                    </div>
+                  </div>
+
+                  {ingestChannel === "single" && (
+                    <form
+                      onSubmit={handleAddSingleLead}
+                      style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}
+                    >
                       <input
-                        placeholder="Customer Name"
+                        placeholder="Customer Name *"
                         value={leadForm.name}
                         onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
                         required
                       />
                       <input
-                        placeholder="Phone Number"
+                        placeholder="Customer Number (Phone) *"
                         value={leadForm.phone}
                         onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
                         required
                       />
                       <input
-                        placeholder="Email (optional)"
+                        placeholder="Serial Number"
+                        value={leadForm.serial_number}
+                        onChange={(e) => setLeadForm((f) => ({ ...f, serial_number: e.target.value }))}
+                      />
+                      <input
+                        placeholder="Email"
                         value={leadForm.email}
                         onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
                       />
@@ -884,7 +1091,7 @@ export default function CampaignsSection({
                           <option value="">Unassigned Pool</option>
                           {teamUsers.map((u) => (
                             <option key={u.id} value={u.id}>
-                              Assign to: {u.full_name || u.email} ({u.role})
+                              Assign: {u.full_name || u.email}
                             </option>
                           ))}
                         </select>
@@ -903,83 +1110,186 @@ export default function CampaignsSection({
                           }}
                         />
                       ))}
-                      <button type="submit">Add Prospect</button>
-                    </form>
-                  </div>
-
-                  <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        marginBottom: 8,
-                      }}
-                    >
-                      <h4 style={{ margin: 0 }}>Bulk CSV Upload & Mapping</h4>
-                      <button
-                        type="button"
-                        onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
-                      >
-                        Download Sample CSV
+                      <input
+                        placeholder="Notes"
+                        value={leadForm.notes}
+                        onChange={(e) => setLeadForm((f) => ({ ...f, notes: e.target.value }))}
+                      />
+                      <button type="submit" style={{ fontWeight: "bold" }}>
+                        Save Prospect
                       </button>
-                    </div>
-                    <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
+                    </form>
+                  )}
 
-                    {csvHeaders.length > 0 && (
-                      <form onSubmit={handleImportMappedCsv} style={{ marginTop: 10, display: "grid", gap: 6 }}>
-                        <div style={{ fontSize: 12, fontWeight: "bold" }}>
-                          Map CSV Columns ({csvRawRows.length} rows ready):
-                        </div>
-                        {csvHeaders.map((h) => {
-                          const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
-                          return (
-                            <div key={h} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
-                              <code style={{ minWidth: 90 }}>{h}</code>
-                              <select
-                                value={entry.target}
-                                onChange={(e) =>
-                                  setColumnMapping((prev) => ({
-                                    ...prev,
-                                    [h]: { ...entry, target: e.target.value },
-                                  }))
-                                }
-                              >
-                                <option value="std:name">Name</option>
-                                <option value="std:phone">Phone</option>
-                                <option value="std:email">Email</option>
-                                <option value="std:notes">Notes</option>
-                                <option value="std:follow_up_at">Follow-Up</option>
-                                {callFields.map((cf) => (
-                                  <option key={cf.id} value={`custom:${cf.field_key}`}>
-                                    Project Field: {cf.label} ({cf.field_key})
-                                  </option>
-                                ))}
-                                <option value="new_field">+ Create New Project Field</option>
-                                <option value="ignore">Ignore</option>
-                              </select>
-                              {entry.target === "new_field" && (
-                                <input
-                                  placeholder="New field name"
-                                  value={entry.newFieldName}
+                  {ingestChannel === "csv_excel" && (
+                    <div>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                        <input
+                          type="file"
+                          accept=".csv,.xlsx,.xls,text/csv"
+                          onChange={handleFileChange}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
+                        >
+                          Download Sample CSV
+                        </button>
+                      </div>
+
+                      {csvHeaders.length > 0 && (
+                        <form onSubmit={handleImportMappedRows} style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                          <div style={{ fontSize: 13, fontWeight: "bold" }}>
+                            Step 2 — Map Columns ({csvRawRows.length} rows ready; deduplicates by phone in campaign):
+                          </div>
+                          {csvHeaders.map((h) => {
+                            const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
+                            return (
+                              <div key={h} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+                                <code style={{ minWidth: 120 }}>{h}</code>
+                                <select
+                                  value={entry.target}
                                   onChange={(e) =>
                                     setColumnMapping((prev) => ({
                                       ...prev,
-                                      [h]: { ...entry, newFieldName: e.target.value },
+                                      [h]: { ...entry, target: e.target.value },
                                     }))
                                   }
-                                  style={{ width: 120 }}
-                                />
-                              )}
-                            </div>
-                          );
-                        })}
-                        <button type="submit" style={{ fontWeight: "bold", marginTop: 4 }}>
-                          Import Mapped Leads
-                        </button>
-                      </form>
-                    )}
-                  </div>
+                                >
+                                  <option value="std:name">Customer Name</option>
+                                  <option value="std:phone">Customer Number (Phone)</option>
+                                  <option value="std:serial_number">Serial Number</option>
+                                  <option value="std:email">Email</option>
+                                  <option value="std:notes">Notes</option>
+                                  <option value="std:follow_up_at">Follow-Up</option>
+                                  {callFields.map((cf) => (
+                                    <option key={cf.id} value={`custom:${cf.field_key}`}>
+                                      Field: {cf.label} ({cf.field_key})
+                                    </option>
+                                  ))}
+                                  <option value="new_field">Other / Create New Field</option>
+                                  <option value="ignore">Ignore Column</option>
+                                </select>
+                                {entry.target === "new_field" && (
+                                  <input
+                                    placeholder="New field name (e.g. Serial Number)"
+                                    value={entry.newFieldName}
+                                    onChange={(e) =>
+                                      setColumnMapping((prev) => ({
+                                        ...prev,
+                                        [h]: { ...entry, newFieldName: e.target.value },
+                                      }))
+                                    }
+                                    style={{ width: 180 }}
+                                  />
+                                )}
+                              </div>
+                            );
+                          })}
+                          <div>
+                            <button type="submit" disabled={importingRows} style={{ fontWeight: "bold", padding: "6px 14px" }}>
+                              {importingRows ? "Importing..." : "Run Import & Deduplicate"}
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {importSummary && (
+                        <div style={{ marginTop: 14 }}>
+                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dcfce7", color: "#166534", fontSize: 12, fontWeight: "bold" }}>
+                              Created ({importSummary.created})
+                            </span>
+                            <span style={{ padding: "4px 10px", borderRadius: 999, background: "#dbeafe", color: "#1e40af", fontSize: 12, fontWeight: "bold" }}>
+                              Updated ({importSummary.updated})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowErrorTable((v) => !v)}
+                              style={{
+                                padding: "4px 10px",
+                                borderRadius: 999,
+                                background: "#fee2e2",
+                                color: "#991b1b",
+                                border: "1px solid #fca5a5",
+                                fontSize: 12,
+                                fontWeight: "bold",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Errors ({importSummary.errors.length}) {showErrorTable ? "▲" : "▼"}
+                            </button>
+                          </div>
+
+                          {showErrorTable && importSummary.errors.length > 0 && (
+                            <table border="1" cellPadding="6" style={{ width: "100%", borderCollapse: "collapse", marginTop: 10, fontSize: 12 }}>
+                              <thead>
+                                <tr>
+                                  <th>Row</th>
+                                  <th>Raw Phone / Data</th>
+                                  <th>Validation / Error Reason</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {importSummary.errors.map((err, i) => (
+                                  <tr key={i}>
+                                    <td>#{err.row_number}</td>
+                                    <td><code>{err.raw}</code></td>
+                                    <td style={{ color: "#991b1b" }}>{err.reason}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {ingestChannel === "email" && (
+                    <form onSubmit={handleEmailToLead} style={{ display: "grid", gap: 8, maxWidth: 560 }}>
+                      <div style={{ fontSize: 12, color: "#475569" }}>
+                        Inbound endpoint: <code>/api/leads/inbound-email</code> (accepts forwarded/parsed emails and tags source as <code>email</code>).
+                      </div>
+                      <input
+                        placeholder="Sender / From (e.g. Priya Nair <priya@example.com>)"
+                        value={emailLeadForm.from}
+                        onChange={(e) => setEmailLeadForm((f) => ({ ...f, from: e.target.value }))}
+                        required
+                      />
+                      <input
+                        placeholder="Subject (e.g. Inquiry for 9822011223)"
+                        value={emailLeadForm.subject}
+                        onChange={(e) => setEmailLeadForm((f) => ({ ...f, subject: e.target.value }))}
+                      />
+                      <textarea
+                        rows={3}
+                        placeholder="Email body containing phone number & inquiry details..."
+                        value={emailLeadForm.body}
+                        onChange={(e) => setEmailLeadForm((f) => ({ ...f, body: e.target.value }))}
+                        required
+                      />
+                      <button type="submit" style={{ width: "fit-content" }}>
+                        Parse & Create Email Lead
+                      </button>
+                    </form>
+                  )}
+
+                  {ingestChannel === "api" && (
+                    <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap: 8, maxWidth: 620 }}>
+                      <div style={{ fontSize: 12, color: "#475569" }}>
+                        Campaign REST Endpoint: <code>POST {campaignIngestUrl}</code>
+                      </div>
+                      <textarea
+                        rows={5}
+                        value={apiTestPayload}
+                        onChange={(e) => setApiTestPayload(e.target.value)}
+                      />
+                      <button type="submit" style={{ width: "fit-content" }}>
+                        Send Test Lead to Campaign API
+                      </button>
+                    </form>
+                  )}
                 </div>
               )}
 
@@ -1045,6 +1355,17 @@ export default function CampaignsSection({
                     <option value="follow_up">follow_up</option>
                     <option value="converted">converted</option>
                     <option value="closed">closed</option>
+                  </select>
+
+                  <select
+                    value={filters.source}
+                    onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}
+                  >
+                    <option value="all">All Sources</option>
+                    <option value="manual">manual</option>
+                    <option value="csv_import">csv_import</option>
+                    <option value="email">email</option>
+                    <option value="api">api</option>
                   </select>
 
                   {teamUsers.length > 0 && (
@@ -1144,6 +1465,7 @@ export default function CampaignsSection({
                   <tr>
                     <th>Customer</th>
                     <th>Phone</th>
+                    <th>Source</th>
                     <th>Assigned To</th>
                     <th>Parameters</th>
                     <th>Status</th>
@@ -1163,6 +1485,7 @@ export default function CampaignsSection({
                           {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
                         </td>
                         <td>{l.phone}</td>
+                        <td><code>{l.source || "manual"}</code></td>
                         <td>
                           {teamUsers.length > 0 ? (
                             <select
@@ -1250,7 +1573,7 @@ export default function CampaignsSection({
                   })}
                   {filteredLeads.length === 0 && (
                     <tr>
-                      <td colSpan={onDialLead ? "8" : "7"}>No leads match the selected filters.</td>
+                      <td colSpan={onDialLead ? "9" : "8"}>No leads match the selected filters.</td>
                     </tr>
                   )}
                 </tbody>
