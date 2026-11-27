@@ -17,6 +17,36 @@ function isLeadClosed(lead) {
   return ["closed", "converted", "completed", "won", "lost"].includes(st);
 }
 
+function parseSpreadsheetXmlRows(xmlText) {
+  try {
+    if (typeof window === "undefined" || typeof DOMParser === "undefined") return null;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, "text/xml");
+    const rowsEls = Array.from(doc.getElementsByTagName("Row"));
+    if (rowsEls.length === 0) return null;
+
+    const matrix = rowsEls.map((rowEl) => {
+      const cells = Array.from(rowEl.getElementsByTagName("Cell"));
+      return cells.map((cellEl) => {
+        const dataEl = cellEl.getElementsByTagName("Data")[0];
+        return dataEl ? String(dataEl.textContent || "").trim() : "";
+      });
+    });
+
+    const headers = (matrix[0] || []).map((h, idx) => String(h || `Column_${idx + 1}`).trim());
+    const rows = matrix.slice(1).map((r) => {
+      const obj = {};
+      headers.forEach((h, i) => {
+        obj[h] = r[i] ?? "";
+      });
+      return obj;
+    });
+    return { headers, rows };
+  } catch {
+    return null;
+  }
+}
+
 export default function CampaignsSection({
   session,
   profile,
@@ -245,7 +275,7 @@ export default function CampaignsSection({
     setColumnMapping(nextMap);
   }
 
-  async function handleFileChange(e) {
+  function handleFileChange(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     setImportSummary(null);
@@ -254,46 +284,34 @@ export default function CampaignsSection({
     const fileName = String(file.name || "").toLowerCase();
     const isExcel = fileName.endsWith(".xlsx") || fileName.endsWith(".xls");
 
-    if (!isExcel) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const parsed = parseCsvRows(String(reader.result || ""));
-        setCsvHeaders(parsed.headers);
-        setCsvRawRows(parsed.rows);
-        applyAutoMapping(parsed.headers);
-        onNotify(`Loaded ${parsed.rows.length} row(s) from "${file.name}". Map columns and import.`);
-      };
-      reader.readAsText(file);
-      return;
-    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawText = String(reader.result || "");
+      if (isExcel && (rawText.trim().startsWith("<?xml") || rawText.includes("<Workbook"))) {
+        const xmlParsed = parseSpreadsheetXmlRows(rawText);
+        if (xmlParsed && xmlParsed.headers.length > 0) {
+          setCsvHeaders(xmlParsed.headers);
+          setCsvRawRows(xmlParsed.rows);
+          applyAutoMapping(xmlParsed.headers);
+          onNotify(`Loaded ${xmlParsed.rows.length} row(s) from "${file.name}". Map columns and import.`);
+          return;
+        }
+      }
 
-    try {
-      const XLSX = await import("xlsx");
-      const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer, { type: "array" });
-      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-      const matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: "" });
-      if (!Array.isArray(matrix) || matrix.length === 0) {
-        onNotify("Excel sheet is empty.");
+      if (isExcel && rawText.startsWith("PK")) {
+        onNotify(
+          "Binary .xlsx/.xls detected. Please save/export as .csv to import without extra build packages."
+        );
         return;
       }
 
-      const headers = (matrix[0] || []).map((h, idx) => String(h || `Column_${idx + 1}`).trim());
-      const rows = matrix.slice(1).map((r) => {
-        const obj = {};
-        headers.forEach((h, i) => {
-          obj[h] = r[i] ?? "";
-        });
-        return obj;
-      });
-
-      setCsvHeaders(headers);
-      setCsvRawRows(rows);
-      applyAutoMapping(headers);
-      onNotify(`Loaded ${rows.length} Excel row(s) from "${file.name}". Map columns and import.`);
-    } catch {
-      onNotify('Excel (.xlsx/.xls) parsing requires the "xlsx" package, or upload a .csv file.');
-    }
+      const parsed = parseCsvRows(rawText);
+      setCsvHeaders(parsed.headers);
+      setCsvRawRows(parsed.rows);
+      applyAutoMapping(parsed.headers);
+      onNotify(`Loaded ${parsed.rows.length} row(s) from "${file.name}". Map columns and import.`);
+    };
+    reader.readAsText(file);
   }
 
   async function handleImportMappedRows(e) {
@@ -1276,312 +1294,4 @@ export default function CampaignsSection({
                   )}
 
                   {ingestChannel === "api" && (
-                    <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap: 8, maxWidth: 620 }}>
-                      <div style={{ fontSize: 12, color: "#475569" }}>
-                        Campaign REST Endpoint: <code>POST {campaignIngestUrl}</code>
-                      </div>
-                      <textarea
-                        rows={5}
-                        value={apiTestPayload}
-                        onChange={(e) => setApiTestPayload(e.target.value)}
-                      />
-                      <button type="submit" style={{ width: "fit-content" }}>
-                        Send Test Lead to Campaign API
-                      </button>
-                    </form>
-                  )}
-                </div>
-              )}
-
-              {campaignView === "pending_calls" && (
-                <div
-                  style={{
-                    padding: 12,
-                    border: "1px solid #cbd5e1",
-                    borderRadius: 8,
-                    marginBottom: 12,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                    gap: 10,
-                  }}
-                >
-                  <div>
-                    <strong>Pending Calls Queue — {activeCampaign?.name}</strong>{" "}
-                    <span style={{ fontSize: 13, color: "#475569" }}>
-                      ({filteredLeads.length} matching of {pendingCallLeads.length} pending)
-                    </span>
-                  </div>
-                  {onDialLead && filteredLeads.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => onDialLead(filteredLeads[0])}
-                      style={{
-                        padding: "7px 14px",
-                        fontWeight: "bold",
-                        background: "#166534",
-                        color: "#ffffff",
-                        border: "none",
-                        borderRadius: 6,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Start Calling ({filteredLeads[0].name})
-                    </button>
-                  )}
-                </div>
-              )}
-
-              <div
-                style={{
-                  padding: 10,
-                  border: "1px solid #cbd5e1",
-                  borderRadius: 8,
-                  background: "#f8fafc",
-                  marginBottom: 12,
-                  display: "grid",
-                  gap: 8,
-                }}
-              >
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <select
-                    value={filters.status}
-                    onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
-                  >
-                    <option value="all">All Statuses</option>
-                    <option value="new">new</option>
-                    <option value="contacted">contacted</option>
-                    <option value="follow_up">follow_up</option>
-                    <option value="converted">converted</option>
-                    <option value="closed">closed</option>
-                  </select>
-
-                  <select
-                    value={filters.source}
-                    onChange={(e) => setFilters((f) => ({ ...f, source: e.target.value }))}
-                  >
-                    <option value="all">All Sources</option>
-                    <option value="manual">manual</option>
-                    <option value="csv_import">csv_import</option>
-                    <option value="email">email</option>
-                    <option value="api">api</option>
-                  </select>
-
-                  {teamUsers.length > 0 && (
-                    <select
-                      value={filters.assignedTo}
-                      onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
-                    >
-                      <option value="all">All Assignees</option>
-                      <option value="__unassigned__">Unassigned Pool</option>
-                      {teamUsers.map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.full_name || u.email}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-
-                  <select
-                    value={filters.callKind}
-                    onChange={(e) => setFilters((f) => ({ ...f, callKind: e.target.value }))}
-                  >
-                    <option value="all">All Leads</option>
-                    <option value="fresh">Only Fresh Call</option>
-                    <option value="followup">Only Follow-Up Call</option>
-                    <option value="fresh_and_followup">Fresh & Follow-Up Call</option>
-                  </select>
-
-                  <select
-                    value={filters.disposition}
-                    onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-                  >
-                    <option value="all">All Dispositions</option>
-                    <option value="__none__">No Disposition</option>
-                    {dispositions.map((d) => (
-                      <option key={d.id} value={d.name}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={filters.paramKey}
-                    onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
-                  >
-                    <option value="">Parameter Filter</option>
-                    {paramOptions.map((po) => (
-                      <option key={po.key} value={po.key}>
-                        {po.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  <input
-                    placeholder="Parameter value"
-                    value={filters.paramValue}
-                    onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
-                    style={{ width: 140 }}
-                  />
-
-                  <input
-                    placeholder="Search name / phone..."
-                    value={filters.search}
-                    onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
-                    style={{ width: 170 }}
-                  />
-                </div>
-
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <span style={{ fontSize: 12, fontWeight: "bold" }}>
-                    Bulk ({filteredLeads.length} filtered):
-                  </span>
-                  <input
-                    type="datetime-local"
-                    value={bulkFollowUpAt}
-                    onChange={(e) => setBulkFollowUpAt(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleBulkSetFollowUp}
-                    disabled={!bulkFollowUpAt || filteredLeads.length === 0}
-                  >
-                    Bulk Set Follow-Up
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleBulkDeleteFiltered}
-                    disabled={filteredLeads.length === 0}
-                    style={{ color: "#991b1b" }}
-                  >
-                    Delete Filtered
-                  </button>
-                </div>
-              </div>
-
-              <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr>
-                    <th>Customer</th>
-                    <th>Phone</th>
-                    <th>Source</th>
-                    <th>Assigned To</th>
-                    <th>Parameters</th>
-                    <th>Status</th>
-                    <th>Last Disposition</th>
-                    <th>Follow-Up</th>
-                    {onDialLead && <th>Call</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredLeads.map((l) => {
-                    const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
-                    const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
-                    return (
-                      <tr key={l.id}>
-                        <td>
-                          <strong>{l.name}</strong>
-                          {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
-                        </td>
-                        <td>{l.phone}</td>
-                        <td><code>{l.source || "manual"}</code></td>
-                        <td>
-                          {teamUsers.length > 0 ? (
-                            <select
-                              value={l.assigned_to || ""}
-                              onChange={(e) =>
-                                handleUpdateLead(l.id, { assigned_to: e.target.value || null })
-                              }
-                            >
-                              <option value="">Unassigned</option>
-                              {teamUsers.map((u) => (
-                                <option key={u.id} value={u.id}>
-                                  {u.full_name || u.email}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            userNameMap[l.assigned_to] || "Unassigned"
-                          )}
-                        </td>
-                        <td>
-                          {entries.length > 0
-                            ? entries.map(([k, v]) => (
-                                <div key={k} style={{ fontSize: 12 }}>
-                                  <code>{k}</code>: <strong>{String(v)}</strong>
-                                </div>
-                              ))
-                            : "-"}
-                        </td>
-                        <td>
-                          <select
-                            value={l.status || "new"}
-                            onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
-                          >
-                            <option value="new">new</option>
-                            <option value="contacted">contacted</option>
-                            <option value="follow_up">follow_up</option>
-                            <option value="converted">converted</option>
-                            <option value="closed">closed</option>
-                          </select>
-                        </td>
-                        <td>
-                          <select
-                            value={l.disposition || ""}
-                            onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
-                          >
-                            <option value="">-- None --</option>
-                            {dispositions.map((d) => (
-                              <option key={d.id} value={d.name}>
-                                {d.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td>
-                          <input
-                            type="datetime-local"
-                            value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
-                            onChange={(e) =>
-                              handleUpdateLead(l.id, {
-                                follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
-                              })
-                            }
-                          />
-                        </td>
-                        {onDialLead && (
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => onDialLead(l)}
-                              style={{
-                                padding: "5px 10px",
-                                background: "#166534",
-                                color: "#ffffff",
-                                border: "none",
-                                borderRadius: 4,
-                                cursor: "pointer",
-                              }}
-                            >
-                              Call
-                            </button>
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-                  {filteredLeads.length === 0 && (
-                    <tr>
-                      <td colSpan={onDialLead ? "9" : "8"}>No leads match the selected filters.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
+                    <form onSubmit={handleTestApiIngest} style={{ display: "grid", gap:
