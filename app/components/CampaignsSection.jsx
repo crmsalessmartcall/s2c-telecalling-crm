@@ -40,8 +40,8 @@ export default function CampaignsSection({
   const isAgent = profile?.role === "agent";
 
   const [subTab, setSubTab] = useState(initialSubTab);
-  const [campaignView, setCampaignView] = useState(isAgent ? "pending_calls" : "prospects"); // "members" | "prospects" | "pending_calls"
-  const [ingestChannel, setIngestChannel] = useState("csv"); // "single" | "csv" | "api"
+  const [campaignView, setCampaignView] = useState(isAgent ? "pending_calls" : "prospects");
+  const [ingestChannel, setIngestChannel] = useState("csv");
 
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
   const [fieldForm, setFieldForm] = useState({ label: "", field_type: "text" });
@@ -249,13 +249,13 @@ export default function CampaignsSection({
   function selectUnassignedInFiltered() {
     const unassignedIds = filteredLeads.filter((l) => !l.assigned_to).map((l) => l.id);
     setSelectedLeadIds(unassignedIds);
-    onNotify(`Selected ${unassignedIds.length} unassigned lead(s) in current filter.`);
+    onNotify?.(`Selected ${unassignedIds.length} unassigned lead(s) in current filter.`);
   }
 
   async function applyAssigneeToLeads(ids, assigneeId, labelContext) {
     if (!session?.access_token) return;
     if (!Array.isArray(ids) || ids.length === 0) {
-      onNotify("Select at least one lead first.");
+      onNotify?.("Select at least one lead first.");
       return;
     }
 
@@ -275,7 +275,7 @@ export default function CampaignsSection({
       });
 
       if (!res.ok) {
-        onNotify(res.data?.error || "Failed to allocate/transfer leads.");
+        onNotify?.(res.data?.error || "Failed to allocate/transfer leads.");
         return;
       }
 
@@ -283,8 +283,8 @@ export default function CampaignsSection({
         ? userNameMap[assigneeId] || "selected agent"
         : "Unassigned Pool";
       setSelectedLeadIds((prev) => prev.filter((id) => !ids.includes(id)));
-      onNotify(`${labelContext}: assigned ${ids.length} lead(s) to ${targetLabel}.`);
-      await onReloadAll();
+      onNotify?.(`${labelContext}: assigned ${ids.length} lead(s) to ${targetLabel}.`);
+      await onReloadAll?.();
     } finally {
       setAllocatingLeads(false);
     }
@@ -331,7 +331,7 @@ export default function CampaignsSection({
       setCsvHeaders(parsed.headers);
       setCsvRawRows(parsed.rows);
       applyAutoMapping(parsed.headers);
-      onNotify(`Loaded ${parsed.rows.length} CSV row(s) from "${file.name}". Map columns and import.`);
+      onNotify?.(`Loaded ${parsed.rows.length} CSV row(s) from "${file.name}". Map columns and import.`);
     };
     reader.readAsText(file);
   }
@@ -397,7 +397,7 @@ export default function CampaignsSection({
       });
 
       if (!res.ok) {
-        onNotify(res.data?.error || "Failed to import mapped leads.");
+        onNotify?.(res.data?.error || "Failed to import mapped leads.");
         return;
       }
 
@@ -415,10 +415,10 @@ export default function CampaignsSection({
       setCsvRawRows([]);
       setColumnMapping({});
 
-      onNotify(
+      onNotify?.(
         `Import finished — Created: ${created}, Updated: ${updated}, Errors: ${errs.length}.`
       );
-      await onReloadAll();
+      await onReloadAll?.();
     } finally {
       setImportingRows(false);
     }
@@ -431,7 +431,7 @@ export default function CampaignsSection({
     try {
       parsed = JSON.parse(apiTestPayload);
     } catch {
-      onNotify("Invalid JSON payload for API-to-Lead test.");
+      onNotify?.("Invalid JSON payload for API-to-Lead test.");
       return;
     }
 
@@ -441,11 +441,11 @@ export default function CampaignsSection({
       body: JSON.stringify(parsed),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "API-to-Lead request failed.");
+      onNotify?.(res.data?.error || "API-to-Lead request failed.");
       return;
     }
-    onNotify(`API lead created: "${res.data.lead?.name}" (${res.data.lead?.phone}).`);
-    await onReloadAll();
+    onNotify?.(`API lead created: "${res.data.lead?.name}" (${res.data.lead?.phone}).`);
+    await onReloadAll?.();
   }
 
   async function handleToggleCampaignMember(userId, currentlyAssigned) {
@@ -466,15 +466,15 @@ export default function CampaignsSection({
         }),
       });
       if (!res.ok) {
-        onNotify(res.data?.error || "Failed to update campaign member.");
+        onNotify?.(res.data?.error || "Failed to update campaign member.");
         return;
       }
-      onNotify(
+      onNotify?.(
         currentlyAssigned
           ? `Removed ${userNameMap[userId] || "member"} from campaign.`
           : `Assigned ${userNameMap[userId] || "member"} to campaign.`
       );
-      await onReloadAll();
+      await onReloadAll?.();
     } finally {
       setSavingMemberId(null);
     }
@@ -484,7 +484,7 @@ export default function CampaignsSection({
     if (!session?.access_token || !selectedProjectId) return;
     const memberIds = Array.from(assignedMemberIds);
     if (memberIds.length === 0) {
-      onNotify("Assign at least one member to this campaign before distributing leads.");
+      onNotify?.("Assign at least one member to this campaign before distributing leads.");
       return;
     }
     const targetLeads =
@@ -495,7 +495,7 @@ export default function CampaignsSection({
         : campaignLeads;
 
     if (targetLeads.length === 0) {
-      onNotify("No leads available in this campaign to distribute.");
+      onNotify?.("No leads available in this campaign to distribute.");
       return;
     }
 
@@ -515,8 +515,8 @@ export default function CampaignsSection({
         if (res.ok) updatedCount += 1;
       }
       setSelectedLeadIds([]);
-      onNotify(`Distributed ${updatedCount} lead(s) across ${memberIds.length} campaign member(s).`);
-      await onReloadAll();
+      onNotify?.(`Distributed ${updatedCount} lead(s) across ${memberIds.length} campaign member(s).`);
+      await onReloadAll?.();
     } finally {
       setDistributingLeads(false);
     }
@@ -539,13 +539,13 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to create campaign.");
+      onNotify?.(res.data?.error || "Failed to create campaign.");
       return;
     }
     setProjectForm({ name: "", description: "" });
-    onNotify(`Created active campaign "${res.data.project?.name}".`);
-    if (res.data.project?.id) onSelectProject(res.data.project.id);
-    await onReloadAll();
+    onNotify?.(`Created active campaign "${res.data.project?.name}".`);
+    if (res.data.project?.id) onSelectProject?.(res.data.project.id);
+    await onReloadAll?.();
   }
 
   async function handleAddDisposition(e) {
@@ -566,12 +566,12 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to add disposition.");
+      onNotify?.(res.data?.error || "Failed to add disposition.");
       return;
     }
     setDispositionForm({ name: "", requires_followup: false });
-    onNotify(`Added disposition "${res.data.disposition?.name}".`);
-    await onReloadAll();
+    onNotify?.(`Added disposition "${res.data.disposition?.name}".`);
+    await onReloadAll?.();
   }
 
   async function handleAddCallField(e) {
@@ -592,12 +592,12 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to add call field.");
+      onNotify?.(res.data?.error || "Failed to add call field.");
       return;
     }
     setFieldForm({ label: "", field_type: "text" });
-    onNotify(`Added call field "${res.data.field?.label}".`);
-    await onReloadAll();
+    onNotify?.(`Added call field "${res.data.field?.label}".`);
+    await onReloadAll?.();
   }
 
   async function handleAddSingleLead(e) {
@@ -628,7 +628,7 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to add lead.");
+      onNotify?.(res.data?.error || "Failed to add lead.");
       return;
     }
     setLeadForm({
@@ -641,8 +641,8 @@ export default function CampaignsSection({
       assigned_to: "",
       custom_fields: {},
     });
-    onNotify(`Added prospect "${res.data.lead?.name}".`);
-    await onReloadAll();
+    onNotify?.(`Added prospect "${res.data.lead?.name}".`);
+    await onReloadAll?.();
   }
 
   async function handleUpdateLead(leadId, patch) {
@@ -656,11 +656,11 @@ export default function CampaignsSection({
       body: JSON.stringify({ lead_id: leadId, ...patch }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to update lead.");
+      onNotify?.(res.data?.error || "Failed to update lead.");
       return;
     }
-    onNotify("Lead updated.");
-    await onReloadAll();
+    onNotify?.("Lead updated.");
+    await onReloadAll?.();
   }
 
   async function handleBulkSetFollowUp() {
@@ -685,11 +685,11 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to set bulk follow-up.");
+      onNotify?.(res.data?.error || "Failed to set bulk follow-up.");
       return;
     }
-    onNotify(`Follow-up scheduled for ${ids.length} lead(s).`);
-    await onReloadAll();
+    onNotify?.(`Follow-up scheduled for ${ids.length} lead(s).`);
+    await onReloadAll?.();
   }
 
   async function handleBulkDeleteFiltered() {
@@ -714,12 +714,12 @@ export default function CampaignsSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data?.error || "Failed to delete leads.");
+      onNotify?.(res.data?.error || "Failed to delete leads.");
       return;
     }
     setSelectedLeadIds((prev) => prev.filter((id) => !ids.includes(id)));
-    onNotify(`Deleted ${count} lead(s).`);
-    await onReloadAll();
+    onNotify?.(`Deleted ${count} lead(s).`);
+    await onReloadAll?.();
   }
 
   const canManageCampaign = [
@@ -756,12 +756,12 @@ export default function CampaignsSection({
             📋 {isAgent ? "My Campaigns" : "Campaigns"} ({activeProjects.length} / {projectsCountAll})
           </h3>
 
-          {profile?.role === "super_admin" && tenants.length > 0 && (
+          {profile?.role === "super_admin" && (tenants || []).length > 0 && (
             <label style={{ fontSize: 13 }}>
               Tenant:{" "}
               <select
                 value={selectedTenantScope}
-                onChange={(e) => onChangeTenantScope(e.target.value)}
+                onChange={(e) => onChangeTenantScope?.(e.target.value)}
                 style={{ padding: "6px 8px", borderRadius: 6 }}
               >
                 {tenants.map((t) => (
@@ -777,7 +777,7 @@ export default function CampaignsSection({
             Active Campaign:{" "}
             <select
               value={selectedProjectId}
-              onChange={(e) => onSelectProject(e.target.value)}
+              onChange={(e) => onSelectProject?.(e.target.value)}
               style={{ padding: "6px 8px", borderRadius: 6 }}
             >
               <option value="">-- Select Active Campaign --</option>
@@ -1525,7 +1525,6 @@ export default function CampaignsSection({
                   />
                 </div>
 
-                {/* Lead Allocation / Transfer Bar for Managers & Supervisors */}
                 {!isAgent && canManageCampaign && teamUsers.length > 0 && (
                   <div
                     style={{
@@ -1804,6 +1803,3 @@ export default function CampaignsSection({
     </section>
   );
 }
-```[cite: 2]
-
-Would you like to share any other files (`TenantsSection.jsx`, `TeamSection.jsx`, or an API route) for a final check before pushing to Vercel?
