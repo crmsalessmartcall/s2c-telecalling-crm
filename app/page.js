@@ -70,6 +70,12 @@ const DEFAULT_LANDING_TAB = {
   agent: "Campaigns",
 };
 
+const ARCHIVED_STATUSES = ["inactive", "archived", "closed", "completed", "disabled"];
+
+function isArchivedStatus(status) {
+  return ARCHIVED_STATUSES.includes(String(status || "active").toLowerCase());
+}
+
 function dedupeById(items = []) {
   const seen = new Set();
   const out = [];
@@ -107,7 +113,7 @@ export default function HomePage() {
     overCapacity: 0,
   });
 
-  const [projects, setProjects] = useState([]);
+  const [allProjects, setAllProjects] = useState([]);
   const [projectsCountAll, setProjectsCountAll] = useState(0);
   const [campaignMembers, setCampaignMembers] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -165,10 +171,7 @@ export default function HomePage() {
   }, [profile, campaignMembers, leads]);
 
   const activeProjects = useMemo(() => {
-    const base = dedupeById(projects || []).filter((p) => {
-      const st = String(p.status || "active").toLowerCase();
-      return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
-    });
+    const base = dedupeById(allProjects || []).filter((p) => !isArchivedStatus(p.status));
 
     if (profile?.role === "agent" && assignedCampaignIdsForAgent) {
       if (assignedCampaignIdsForAgent.size === 0 && (campaignMembers || []).length === 0) {
@@ -177,7 +180,7 @@ export default function HomePage() {
       return base.filter((p) => assignedCampaignIdsForAgent.has(p.id));
     }
     return base;
-  }, [projects, profile, assignedCampaignIdsForAgent, campaignMembers]);
+  }, [allProjects, profile, assignedCampaignIdsForAgent, campaignMembers]);
 
   const scopedLeads = useMemo(() => {
     const uniqueLeads = dedupeById(leads || []);
@@ -313,18 +316,17 @@ export default function HomePage() {
         if (pRes.ok) {
           const allProj = dedupeById(pRes.data.projects || []);
           setProjectsCountAll(allProj.length);
-          const onlyActive = allProj.filter((p) => {
-            const st = String(p.status || "active").toLowerCase();
-            return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
-          });
-          setProjects(onlyActive);
+          setAllProjects(allProj);
+
+          const onlyActive = allProj.filter((p) => !isArchivedStatus(p.status));
           const currentProj = selectedProjectIdRef.current;
           const activeProj =
-            currentProj && onlyActive.some((p) => p.id === currentProj)
+            currentProj && allProj.some((p) => p.id === currentProj)
               ? currentProj
-              : onlyActive[0]?.id || "";
+              : onlyActive[0]?.id || allProj[0]?.id || "";
           selectedProjectIdRef.current = activeProj;
           setSelectedProjectId(activeProj);
+
           await loadCampaignAndLeadsData(
             token,
             currentProfile,
@@ -586,6 +588,7 @@ export default function HomePage() {
             await loadRoleData(session, profile, nextTenant);
           }}
           activeProjects={activeProjects}
+          allProjects={allProjects}
           selectedProjectId={selectedProjectId}
           onSelectProject={async (nextProj) => {
             selectedProjectIdRef.current = nextProj;
@@ -601,7 +604,7 @@ export default function HomePage() {
           callFields={callFields}
           dispositions={dispositions}
           leads={scopedLeads}
-          initialSubTab={activeTab === "Settings / Rules" ? "settings" : "calling_data"}
+          callLogs={scopedCallLogs}
           onReloadAll={() => loadRoleData(session, profile)}
           onNotify={setStatusMessage}
           onDialLead={(lead) => {
