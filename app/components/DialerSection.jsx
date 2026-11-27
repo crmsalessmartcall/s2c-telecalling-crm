@@ -91,6 +91,14 @@ export default function DialerSection({
     callStartedAt: null,
   });
 
+  const [showEmailBox, setShowEmailBox] = useState(false);
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailForm, setEmailForm] = useState({
+    to: "",
+    subject: "",
+    body: "",
+  });
+
   useEffect(() => {
     if (!initialDialLead) return;
     setQueueActive(false);
@@ -104,6 +112,11 @@ export default function DialerSection({
       follow_up_at: initialDialLead.follow_up_at ? formatLocalInput(initialDialLead.follow_up_at) : "",
       custom_fields: { ...getCustomFields(initialDialLead) },
       callStartedAt: new Date().toISOString(),
+    });
+    setEmailForm({
+      to: initialDialLead.email || "",
+      subject: `Follow-up regarding your inquiry (${initialDialLead.name || ""})`,
+      body: "",
     });
     onNotify(`Started call to ${initialDialLead.name} (${initialDialLead.phone}).`);
     onClearInitialDialLead?.();
@@ -139,6 +152,11 @@ export default function DialerSection({
     return null;
   }, [queueActive, queueLeads, queueIndex, form.lead_id, leads]);
 
+  const selectedDispositionObj = useMemo(
+    () => (dispositions || []).find((d) => d.name === form.disposition) || null,
+    [dispositions, form.disposition]
+  );
+
   const CALLS_PER_PAGE = 10;
   const totalPages = Math.max(1, Math.ceil((callLogs || []).length / CALLS_PER_PAGE));
   const pageCalls = useMemo(() => {
@@ -158,6 +176,26 @@ export default function DialerSection({
       follow_up_at: lead.follow_up_at ? formatLocalInput(lead.follow_up_at) : "",
       custom_fields: { ...getCustomFields(lead) },
       callStartedAt: null,
+    });
+    setEmailForm((prev) => ({
+      to: lead.email || "",
+      subject: prev.subject || `Follow-up with ${lead.name || "Prospect"}`,
+      body: prev.body || "",
+    }));
+  }
+
+  function handleDispositionChange(nextDispositionName) {
+    const dispObj = (dispositions || []).find((d) => d.name === nextDispositionName);
+    setForm((prev) => {
+      const nextFollowUp =
+        dispObj?.requires_followup && !prev.follow_up_at
+          ? formatLocalInput(new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString())
+          : prev.follow_up_at;
+      return {
+        ...prev,
+        disposition: nextDispositionName,
+        follow_up_at: nextFollowUp,
+      };
     });
   }
 
@@ -231,7 +269,7 @@ export default function DialerSection({
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to save call log.");
+      onNotify(res.data?.error || "Failed to save call log.");
       return;
     }
 
@@ -255,6 +293,45 @@ export default function DialerSection({
     }
   }
 
+  async function handleSendInlineEmail(e) {
+    e.preventDefault();
+    if (!session?.access_token) return;
+    if (!emailForm.to.trim() || !emailForm.subject.trim() || !emailForm.body.trim()) {
+      onNotify("Recipient email, subject, and message body are required.");
+      return;
+    }
+
+    setSendingEmail(true);
+    try {
+      const res = await safeJsonFetch("/api/communications/email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+          project_id: filter.project_id || currentLead?.project_id || selectedProjectId || null,
+          lead_id: form.lead_id || currentLead?.id || null,
+          to: emailForm.to.trim(),
+          subject: emailForm.subject.trim(),
+          body: emailForm.body.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        onNotify(res.data?.error || "Failed to send email.");
+        return;
+      }
+
+      setEmailForm((prev) => ({ ...prev, body: "" }));
+      onNotify(`Email logged/sent to ${emailForm.to.trim()}.`);
+      await onReload();
+    } finally {
+      setSendingEmail(false);
+    }
+  }
+
   async function handleQuickFollowUp(leadId) {
     if (!session?.access_token || !leadId) return;
     const res = await safeJsonFetch("/api/leads", {
@@ -270,7 +347,7 @@ export default function DialerSection({
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to schedule follow-up.");
+      onNotify(res.data?.error || "Failed to schedule follow-up.");
       return;
     }
     onNotify("Scheduled +24h follow-up for lead.");
@@ -367,7 +444,7 @@ export default function DialerSection({
       </form>
 
       <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 22 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
           <h4 style={{ margin: 0 }}>
             Calling Workspace{" "}
             {queueActive && queueLeads.length > 0
@@ -376,14 +453,28 @@ export default function DialerSection({
               ? `(One-Click / Selected Lead: ${currentLead.name})`
               : "(Manual / Direct)"}
           </h4>
-          {!queueActive && (
-            <input
-              placeholder="Phone number..."
-              value={form.phone}
-              onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))}
-              style={{ width: 200 }}
-            />
-          )}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => {
+                setShowEmailBox((v) => !v);
+                setEmailForm((prev) => ({
+                  ...prev,
+                  to: prev.to || currentLead?.email || "",
+                }));
+              }}
+            >
+              {showEmailBox ? "Hide Inline Email" : "Inline Email"}
+            </button>
+            {!queueActive && (
+              <input
+                placeholder="Phone number..."
+                value={form.phone}
+                onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))}
+                style={{ width: 200 }}
+              />
+            )}
+          </div>
         </div>
 
         <div
@@ -398,7 +489,8 @@ export default function DialerSection({
         >
           <div>
             <strong>Lead:</strong> {currentLead?.name || "Direct Number"} | <strong>Phone:</strong>{" "}
-            {form.phone || "-"} | <strong>Status:</strong> <code>{currentLead?.status || "new"}</code> |{" "}
+            {form.phone || "-"} | <strong>Email:</strong> {currentLead?.email || "-"} |{" "}
+            <strong>Status:</strong> <code>{currentLead?.status || "new"}</code> |{" "}
             <strong>Last Disposition:</strong> {currentLead?.disposition || "-"}
           </div>
           <div style={{ marginTop: 4, fontSize: 12, color: "#475569" }}>
@@ -411,6 +503,46 @@ export default function DialerSection({
               .join(", ") || "None"}
           </div>
         </div>
+
+        {showEmailBox && (
+          <form
+            onSubmit={handleSendInlineEmail}
+            style={{
+              padding: 12,
+              border: "1px solid #cbd5e1",
+              borderRadius: 6,
+              background: "#f8fafc",
+              marginBottom: 12,
+              display: "grid",
+              gap: 8,
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: "bold" }}>Send Inline Email to Prospect</div>
+            <input
+              type="email"
+              placeholder="Recipient Email"
+              value={emailForm.to}
+              onChange={(e) => setEmailForm((f) => ({ ...f, to: e.target.value }))}
+              required
+            />
+            <input
+              placeholder="Subject"
+              value={emailForm.subject}
+              onChange={(e) => setEmailForm((f) => ({ ...f, subject: e.target.value }))}
+              required
+            />
+            <textarea
+              rows={3}
+              placeholder="Email message body..."
+              value={emailForm.body}
+              onChange={(e) => setEmailForm((f) => ({ ...f, body: e.target.value }))}
+              required
+            />
+            <button type="submit" disabled={sendingEmail} style={{ width: "fit-content", fontWeight: "bold" }}>
+              {sendingEmail ? "Sending..." : "Send Email"}
+            </button>
+          </form>
+        )}
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
           <button type="button" onClick={handleStartCall} disabled={Boolean(form.callStartedAt)}>
@@ -458,20 +590,20 @@ export default function DialerSection({
             Disposition:
             <select
               value={form.disposition}
-              onChange={(e) => setForm((prev) => ({ ...prev, disposition: e.target.value }))}
+              onChange={(e) => handleDispositionChange(e.target.value)}
               style={{ width: "100%", marginTop: 2 }}
             >
               <option value="">-- Select --</option>
               {(dispositions || []).map((d) => (
                 <option key={d.id} value={d.name}>
-                  {d.name}
+                  {d.name} {d.requires_followup ? "(Follow-Up)" : ""}
                 </option>
               ))}
             </select>
           </label>
 
           <label style={{ fontSize: 12 }}>
-            Follow-Up Time:
+            Follow-Up Time {selectedDispositionObj?.requires_followup ? "(Recommended)" : ""}:
             <input
               type="datetime-local"
               value={form.follow_up_at}
@@ -480,22 +612,27 @@ export default function DialerSection({
             />
           </label>
 
-          {(callFields || []).map((cf) => (
-            <label key={cf.id} style={{ fontSize: 12 }}>
-              {cf.label}:
-              <input
-                value={form.custom_fields[cf.field_key] || ""}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setForm((prev) => ({
-                    ...prev,
-                    custom_fields: { ...prev.custom_fields, [cf.field_key]: val },
-                  }));
-                }}
-                style={{ width: "100%", marginTop: 2 }}
-              />
-            </label>
-          ))}
+          {(callFields || []).map((cf) => {
+            const inputType =
+              cf.field_type === "number" ? "number" : cf.field_type === "date" ? "date" : "text";
+            return (
+              <label key={cf.id} style={{ fontSize: 12 }}>
+                {cf.label}:
+                <input
+                  type={inputType}
+                  value={form.custom_fields[cf.field_key] || ""}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setForm((prev) => ({
+                      ...prev,
+                      custom_fields: { ...prev.custom_fields, [cf.field_key]: val },
+                    }));
+                  }}
+                  style={{ width: "100%", marginTop: 2 }}
+                />
+              </label>
+            );
+          })}
 
           <label style={{ fontSize: 12 }}>
             Notes:
