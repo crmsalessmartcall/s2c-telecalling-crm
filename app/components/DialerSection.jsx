@@ -22,6 +22,14 @@ function formatDurationClock(totalSeconds) {
   return `${String(mins).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
 }
 
+function maskPhone(phone) {
+  const raw = String(phone || "");
+  if (!raw) return "—";
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length <= 4) return "****";
+  return `${"*".repeat(Math.max(4, digits.length - 4))}${digits.slice(-4)}`;
+}
+
 function getStatusBadgeStyle(status) {
   const st = String(status || "new").toLowerCase();
   if (st === "converted" || st === "connected" || st === "completed") {
@@ -133,8 +141,17 @@ export default function DialerSection({
     return () => clearInterval(timer);
   }, [form.callStartedAt]);
 
+  const projectById = useMemo(() => {
+    const map = {};
+    for (const p of activeProjects || []) {
+      map[p.id] = p;
+    }
+    return map;
+  }, [activeProjects]);
+
   useEffect(() => {
     if (!initialDialLead) return;
+    const leadHidePhone = Boolean(projectById[initialDialLead.project_id]?.hide_phone_numbers);
     setQueueActive(false);
     setForm({
       lead_id: initialDialLead.id || "",
@@ -147,9 +164,11 @@ export default function DialerSection({
       custom_fields: { ...getCustomFields(initialDialLead) },
       callStartedAt: new Date().toISOString(),
     });
-    onNotify(`Started call to ${initialDialLead.name} (${initialDialLead.phone}).`);
+    onNotify(
+      `Started call to ${initialDialLead.name} (${leadHidePhone ? maskPhone(initialDialLead.phone) : initialDialLead.phone}).`
+    );
     onClearInitialDialLead?.();
-  }, [initialDialLead, onClearInitialDialLead, onNotify]);
+  }, [initialDialLead, onClearInitialDialLead, onNotify, projectById]);
 
   const [callLogPage, setCallLogPage] = useState(1);
   const [expandedCallIds, setExpandedCallIds] = useState({});
@@ -180,6 +199,9 @@ export default function DialerSection({
     }
     return null;
   }, [queueActive, queueLeads, queueIndex, form.lead_id, leads]);
+
+  const activeCampaignId = filter.project_id || currentLead?.project_id || selectedProjectId || "";
+  const hidePhone = Boolean(projectById[activeCampaignId]?.hide_phone_numbers);
 
   const selectedDispositionObj = useMemo(
     () => (dispositions || []).find((d) => d.name === form.disposition) || null,
@@ -269,7 +291,7 @@ export default function DialerSection({
       return;
     }
     setForm((prev) => ({ ...prev, status: "connected", callStartedAt: new Date().toISOString() }));
-    onNotify(`Call started for ${form.phone}.`);
+    onNotify(`Call started for ${hidePhone ? maskPhone(form.phone) : form.phone}.`);
   }
 
   function handleEndCall() {
@@ -306,7 +328,7 @@ export default function DialerSection({
       },
       body: JSON.stringify({
         tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-        project_id: filter.project_id || currentLead?.project_id || selectedProjectId || null,
+        project_id: activeCampaignId || null,
         lead_id: form.lead_id || currentLead?.id || null,
         phone: form.phone.trim(),
         status: form.status,
@@ -595,8 +617,13 @@ export default function DialerSection({
           {!queueActive && (
             <input
               placeholder="Phone number..."
-              value={form.phone}
-              onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))}
+              value={hidePhone ? maskPhone(form.phone) : form.phone}
+              readOnly={hidePhone}
+              onChange={(e) => {
+                if (!hidePhone) {
+                  setForm((prev) => ({ ...prev, phone: e.target.value }));
+                }
+              }}
               style={{ width: 210, padding: "7px 10px", borderRadius: 6, border: "1px solid #94a3b8" }}
             />
           )}
@@ -618,7 +645,9 @@ export default function DialerSection({
             </div>
             <div>
               <strong>📱 Phone:</strong>{" "}
-              <span style={{ fontWeight: 700, color: "#0f172a" }}>{form.phone || "-"}</span>
+              <span style={{ fontWeight: 700, color: "#0f172a" }}>
+                {form.phone ? (hidePhone ? maskPhone(form.phone) : form.phone) : "-"}
+              </span>
             </div>
             <div>
               <strong>🏷️ Last Disposition:</strong> {currentLead?.disposition || "None"}
@@ -879,6 +908,7 @@ export default function DialerSection({
                 c.custom_fields && typeof c.custom_fields === "object"
                   ? Object.entries(c.custom_fields)
                   : [];
+              const rowHidePhone = Boolean(projectById[c.project_id]?.hide_phone_numbers);
               return (
                 <Fragment key={c.id}>
                   <tr>
@@ -891,7 +921,7 @@ export default function DialerSection({
                       </button>
                     </td>
                     <td>{c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</td>
-                    <td>{c.phone}</td>
+                    <td>{rowHidePhone ? maskPhone(c.phone) : c.phone}</td>
                     <td>{c.status}</td>
                     <td>{c.disposition || "-"}</td>
                     <td>{c.duration_seconds || 0}s</td>
@@ -927,7 +957,7 @@ export default function DialerSection({
                                     : {},
                                 callStartedAt: new Date().toISOString(),
                               }));
-                              onNotify(`Calling back ${c.phone}.`);
+                              onNotify(`Calling back ${rowHidePhone ? maskPhone(c.phone) : c.phone}.`);
                             }}
                           >
                             Call Back
