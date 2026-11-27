@@ -22,22 +22,19 @@ export default function CampaignSettingsTab({
   canManageCampaign,
   onReloadAll,
   onNotify,
-  onBackToList,
-  onArchiveCampaign,
-  onCopyCampaign,
   onUpdateCampaignConfig,
 }) {
+  const [settingsRuleMenu, setSettingsRuleMenu] = useState("");
   const [editingDetails, setEditingDetails] = useState(false);
   const [detailsForm, setDetailsForm] = useState({
     name: campaign?.name || "",
     description: campaign?.description || "",
-    script: campaign?.script || "",
     hide_phone_numbers: Boolean(campaign?.hide_phone_numbers),
     auto_dial: Boolean(campaign?.auto_dial),
   });
   const [savingDetails, setSavingDetails] = useState(false);
 
-  // Dispositions state
+  // Disposition state
   const [dispositionForm, setDispositionForm] = useState({
     name: "",
     requires_followup: false,
@@ -48,7 +45,7 @@ export default function CampaignSettingsTab({
     requires_followup: false,
   });
 
-  // Campaign custom fields state (supports text, number/amount, select/dropdown, radio, checkbox)
+  // Campaign Field state
   const [fieldForm, setFieldForm] = useState({
     label: "",
     field_type: "text",
@@ -57,7 +54,7 @@ export default function CampaignSettingsTab({
   });
   const [editableOverrides, setEditableOverrides] = useState({});
 
-  // Custom Form builder & live submission below disposition
+  // Create Form state
   const [selectedDispositionForForm, setSelectedDispositionForForm] = useState("");
   const [formBuilderField, setFormBuilderField] = useState({
     label: "",
@@ -78,7 +75,6 @@ export default function CampaignSettingsTab({
     setDetailsForm({
       name: campaign?.name || "",
       description: campaign?.description || "",
-      script: campaign?.script || "",
       hide_phone_numbers: Boolean(campaign?.hide_phone_numbers),
       auto_dial: Boolean(campaign?.auto_dial),
     });
@@ -91,7 +87,12 @@ export default function CampaignSettingsTab({
     } else {
       setCustomFormFields([
         { key: "amount", label: "Amount", field_type: "number", options: [] },
-        { key: "plan_tier", label: "Plan Selection", field_type: "select", options: ["Starter", "Growth", "Enterprise"] },
+        {
+          key: "plan_tier",
+          label: "Plan Selection",
+          field_type: "select",
+          options: ["Starter", "Growth", "Enterprise"],
+        },
         { key: "gender", label: "Gender", field_type: "radio", options: ["Male", "Female"] },
       ]);
     }
@@ -401,7 +402,45 @@ export default function CampaignSettingsTab({
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
-      {/* 1. Campaign Details + Edit / Archive / Copy */}
+      {/* Settings / Rules Selector Bar inside Campaign Setting */}
+      <div
+        style={{
+          padding: 12,
+          border: "1px solid #cbd5e1",
+          borderRadius: 10,
+          background: "#f8fafc",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 10,
+        }}
+      >
+        <strong style={{ fontSize: 13, color: "#0f172a" }}>
+          Settings & Rules — {campaign.name}
+        </strong>
+        <label style={{ fontSize: 12, fontWeight: 700 }}>
+          Jump to Section:{" "}
+          <select
+            value={settingsRuleMenu}
+            onChange={(e) => {
+              const target = e.target.value;
+              setSettingsRuleMenu(target);
+              if (target) {
+                document.getElementById(`section-${target}`)?.scrollIntoView({ behavior: "smooth" });
+              }
+            }}
+            style={{ padding: "5px 9px", borderRadius: 7, background: "#ffffff" }}
+          >
+            <option value="">All Sections</option>
+            <option value="disposition">Disposition</option>
+            <option value="campaign_field">Campaign Field</option>
+            <option value="create_form">Create Form</option>
+          </select>
+        </label>
+      </div>
+
+      {/* Campaign Details (No Script row; Archive/Copy live on main campaign list) */}
       <div
         style={{
           padding: 16,
@@ -421,12 +460,9 @@ export default function CampaignSettingsTab({
                 rowGap: 10,
                 columnGap: 16,
                 fontSize: 13,
-                marginBottom: 18,
+                marginBottom: 16,
               }}
             >
-              <div style={{ fontWeight: 700, textAlign: "right", color: "#334155" }}>Script</div>
-              <div>{campaign.script || <span style={{ color: "#94a3b8" }}>None</span>}</div>
-
               <div style={{ fontWeight: 700, textAlign: "right", color: "#334155" }}>
                 Hide phone numbers
               </div>
@@ -465,56 +501,21 @@ export default function CampaignSettingsTab({
             </div>
 
             {canManageCampaign && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={() => setEditingDetails(true)}
-                  style={{
-                    padding: "7px 14px",
-                    borderRadius: 6,
-                    border: "1px solid #047857",
-                    background: "#059669",
-                    color: "#ffffff",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const ok = await onArchiveCampaign?.();
-                    if (ok) onBackToList?.();
-                  }}
-                  style={{
-                    padding: "7px 14px",
-                    borderRadius: 6,
-                    border: "1px solid #dc2626",
-                    background: "#ef4444",
-                    color: "#ffffff",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  Archive this Campaign
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onCopyCampaign?.()}
-                  style={{
-                    padding: "7px 14px",
-                    borderRadius: 6,
-                    border: "1px solid #d97706",
-                    background: "#f59e0b",
-                    color: "#ffffff",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  Copy
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setEditingDetails(true)}
+                style={{
+                  padding: "7px 14px",
+                  borderRadius: 6,
+                  border: "1px solid #047857",
+                  background: "#059669",
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Edit
+              </button>
             )}
           </>
         ) : (
@@ -533,15 +534,6 @@ export default function CampaignSettingsTab({
               <input
                 value={detailsForm.description}
                 onChange={(e) => setDetailsForm((f) => ({ ...f, description: e.target.value }))}
-                style={{ width: "100%", padding: "6px 8px", marginTop: 4 }}
-              />
-            </label>
-            <label style={{ fontSize: 12, fontWeight: 600 }}>
-              Calling Script
-              <textarea
-                rows={3}
-                value={detailsForm.script}
-                onChange={(e) => setDetailsForm((f) => ({ ...f, script: e.target.value }))}
                 style={{ width: "100%", padding: "6px 8px", marginTop: 4 }}
               />
             </label>
@@ -595,8 +587,9 @@ export default function CampaignSettingsTab({
         )}
       </div>
 
-      {/* 2. Dispositions (Create & Modify Existing) */}
+      {/* 1. Disposition Section */}
       <div
+        id="section-disposition"
         style={{
           padding: 16,
           border: "1px solid #cbd5e1",
@@ -604,7 +597,7 @@ export default function CampaignSettingsTab({
           background: "#ffffff",
         }}
       >
-        <h4 style={{ marginTop: 0 }}>🏷️ Dispositions ({dispositions.length})</h4>
+        <h4 style={{ marginTop: 0 }}>Disposition ({dispositions.length})</h4>
 
         {canManageCampaign && (
           <form
@@ -751,8 +744,9 @@ export default function CampaignSettingsTab({
         </table>
       </div>
 
-      {/* 3. Campaign Fields (Editable vs Read-Only + Delete) */}
+      {/* 2. Campaign Field Section */}
       <div
+        id="section-campaign_field"
         style={{
           padding: 16,
           border: "1px solid #cbd5e1",
@@ -760,7 +754,7 @@ export default function CampaignSettingsTab({
           background: "#ffffff",
         }}
       >
-        <h4 style={{ marginTop: 0 }}>🧩 Campaign Fields ({callFields.length})</h4>
+        <h4 style={{ marginTop: 0 }}>Campaign Field ({callFields.length})</h4>
 
         {canManageCampaign && (
           <form
@@ -801,7 +795,12 @@ export default function CampaignSettingsTab({
                 placeholder="Options (comma separated, e.g. Male, Female)"
                 value={fieldForm.optionsText}
                 onChange={(e) => setFieldForm((f) => ({ ...f, optionsText: e.target.value }))}
-                style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1", minWidth: 210 }}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  border: "1px solid #cbd5e1",
+                  minWidth: 210,
+                }}
               />
             )}
             <label style={{ fontSize: 12 }}>
@@ -881,8 +880,9 @@ export default function CampaignSettingsTab({
         </table>
       </div>
 
-      {/* 4. Create Form (Disposition dropdown + Dynamic Form below with Amount, Dropdown, Radio Male/Female & Custom Fields) */}
+      {/* 3. Create Form Section */}
       <div
+        id="section-create_form"
         style={{
           padding: 16,
           border: "1px solid #cbd5e1",
@@ -892,7 +892,7 @@ export default function CampaignSettingsTab({
           gap: 14,
         }}
       >
-        <h4 style={{ margin: 0 }}>📝 Create Form — {campaign.name}</h4>
+        <h4 style={{ margin: 0 }}>Create Form — {campaign.name}</h4>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           <label style={{ fontSize: 13, fontWeight: 600 }}>
@@ -916,7 +916,6 @@ export default function CampaignSettingsTab({
           </label>
         </div>
 
-        {/* Add Extra Fields to This Form */}
         {canManageCampaign && (
           <form
             onSubmit={handleAddFormBuilderField}
@@ -953,7 +952,12 @@ export default function CampaignSettingsTab({
                 placeholder="Options (comma separated)"
                 value={formBuilderField.optionsText}
                 onChange={(e) => setFormBuilderField((f) => ({ ...f, optionsText: e.target.value }))}
-                style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #cbd5e1", minWidth: 180 }}
+                style={{
+                  padding: "5px 8px",
+                  borderRadius: 6,
+                  border: "1px solid #cbd5e1",
+                  minWidth: 180,
+                }}
               />
             )}
             <button type="submit" style={{ padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}>
@@ -962,7 +966,6 @@ export default function CampaignSettingsTab({
           </form>
         )}
 
-        {/* Form Displayed Below Disposition */}
         <form
           onSubmit={handleSubmitCustomForm}
           style={{
@@ -979,7 +982,13 @@ export default function CampaignSettingsTab({
               placeholder="Enter name"
               value={formSubmission.name}
               onChange={(e) => setFormSubmission((f) => ({ ...f, name: e.target.value }))}
-              style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", marginTop: 4 }}
+              style={{
+                width: "100%",
+                padding: "7px 10px",
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                marginTop: 4,
+              }}
             />
           </label>
 
@@ -990,7 +999,13 @@ export default function CampaignSettingsTab({
               placeholder="Enter phone"
               value={formSubmission.phone}
               onChange={(e) => setFormSubmission((f) => ({ ...f, phone: e.target.value }))}
-              style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", marginTop: 4 }}
+              style={{
+                width: "100%",
+                padding: "7px 10px",
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                marginTop: 4,
+              }}
             />
           </label>
 
@@ -1018,7 +1033,15 @@ export default function CampaignSettingsTab({
               return (
                 <label key={ff.key} style={{ fontSize: 12, fontWeight: 600 }}>
                   {ff.label}
-                  <div style={{ display: "flex", gap: 12, marginTop: 8, fontWeight: 400, flexWrap: "wrap" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 12,
+                      marginTop: 8,
+                      fontWeight: 400,
+                      flexWrap: "wrap",
+                    }}
+                  >
                     {opts.map((opt) => (
                       <label key={opt} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                         <input
@@ -1053,7 +1076,13 @@ export default function CampaignSettingsTab({
                         custom_values: { ...f.custom_values, [ff.key]: e.target.value },
                       }))
                     }
-                    style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", marginTop: 4 }}
+                    style={{
+                      width: "100%",
+                      padding: "7px 10px",
+                      borderRadius: 6,
+                      border: "1px solid #cbd5e1",
+                      marginTop: 4,
+                    }}
                   >
                     <option value="">-- Select {ff.label} --</option>
                     {opts.map((opt) => (
@@ -1070,7 +1099,9 @@ export default function CampaignSettingsTab({
               <label key={ff.key} style={{ fontSize: 12, fontWeight: 600 }}>
                 {ff.label}
                 <input
-                  type={ff.field_type === "amount" || ff.field_type === "number" ? "number" : "text"}
+                  type={
+                    ff.field_type === "amount" || ff.field_type === "number" ? "number" : "text"
+                  }
                   step={ff.field_type === "amount" ? "0.01" : undefined}
                   placeholder={`Enter ${ff.label}`}
                   value={val}
@@ -1080,7 +1111,13 @@ export default function CampaignSettingsTab({
                       custom_values: { ...f.custom_values, [ff.key]: e.target.value },
                     }))
                   }
-                  style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", marginTop: 4 }}
+                  style={{
+                    width: "100%",
+                    padding: "7px 10px",
+                    borderRadius: 6,
+                    border: "1px solid #cbd5e1",
+                    marginTop: 4,
+                  }}
                 />
               </label>
             );
@@ -1092,7 +1129,13 @@ export default function CampaignSettingsTab({
               placeholder="Call / form notes"
               value={formSubmission.notes}
               onChange={(e) => setFormSubmission((f) => ({ ...f, notes: e.target.value }))}
-              style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1", marginTop: 4 }}
+              style={{
+                width: "100%",
+                padding: "7px 10px",
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                marginTop: 4,
+              }}
             />
           </label>
 
