@@ -37,13 +37,43 @@ export default function FollowUpsSection({
     return map;
   }, [activeProjects]);
 
-  const scheduledFollowUps = useMemo(() => {
+  const baseFollowUps = useMemo(() => {
+    return (leads || []).filter((l) => {
+      if (!l.follow_up_at) return false;
+      const st = String(l.status || "").toLowerCase();
+      return !["closed", "completed", "converted", "won", "lost"].includes(st);
+    });
+  }, [leads]);
+
+  const timingCounts = useMemo(() => {
     const now = new Date();
+    const nowMs = now.getTime();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const endOfToday = startOfToday + 24 * 60 * 60 * 1000;
 
-    return (leads || [])
-      .filter((l) => Boolean(l.follow_up_at))
+    let overdue = 0;
+    let today = 0;
+    let upcoming = 0;
+
+    for (const l of baseFollowUps) {
+      if (projectFilter && l.project_id !== projectFilter) continue;
+      const fuMs = new Date(l.follow_up_at).getTime();
+      if (Number.isNaN(fuMs)) continue;
+      if (fuMs < nowMs) overdue += 1;
+      if (fuMs >= startOfToday && fuMs < endOfToday) today += 1;
+      if (fuMs >= nowMs) upcoming += 1;
+    }
+
+    return { overdue, today, upcoming };
+  }, [baseFollowUps, projectFilter]);
+
+  const scheduledFollowUps = useMemo(() => {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const endOfToday = startOfToday + 24 * 60 * 60 * 1000;
+
+    return baseFollowUps
       .filter((l) => {
         if (projectFilter && l.project_id !== projectFilter) return false;
 
@@ -56,9 +86,9 @@ export default function FollowUpsSection({
 
         const fuMs = new Date(l.follow_up_at).getTime();
         if (!Number.isNaN(fuMs)) {
-          if (timingFilter === "overdue" && fuMs >= now.getTime()) return false;
+          if (timingFilter === "overdue" && fuMs >= nowMs) return false;
           if (timingFilter === "today" && (fuMs < startOfToday || fuMs >= endOfToday)) return false;
-          if (timingFilter === "upcoming" && fuMs < now.getTime()) return false;
+          if (timingFilter === "upcoming" && fuMs < nowMs) return false;
         }
 
         if (search.trim()) {
@@ -66,6 +96,7 @@ export default function FollowUpsSection({
           const hit =
             String(l.name || "").toLowerCase().includes(q) ||
             String(l.phone || "").toLowerCase().includes(q) ||
+            String(l.email || "").toLowerCase().includes(q) ||
             String(l.disposition || "").toLowerCase().includes(q) ||
             String(l.notes || "").toLowerCase().includes(q);
           if (!hit) return false;
@@ -74,7 +105,7 @@ export default function FollowUpsSection({
         return true;
       })
       .sort((a, b) => new Date(a.follow_up_at).getTime() - new Date(b.follow_up_at).getTime());
-  }, [leads, projectFilter, timingFilter, dispositionFilter, search]);
+  }, [baseFollowUps, projectFilter, timingFilter, dispositionFilter, search]);
 
   async function handleSaveReschedule(lead, overrideIso = null) {
     if (!session?.access_token) return;
@@ -106,7 +137,7 @@ export default function FollowUpsSection({
       });
 
       if (!res.ok) {
-        onNotify(res.data.error || "Failed to reschedule follow-up.");
+        onNotify(res.data?.error || "Failed to reschedule follow-up.");
         return;
       }
 
@@ -116,6 +147,36 @@ export default function FollowUpsSection({
         return next;
       });
       onNotify(`Rescheduled follow-up for ${lead.name}.`);
+      await onReload();
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  async function handleCompleteFollowUp(lead) {
+    if (!session?.access_token) return;
+    setSavingId(lead.id);
+    try {
+      const res = await safeJsonFetch("/api/leads", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          lead_id: lead.id,
+          status: "completed",
+          follow_up_at: null,
+          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        onNotify(res.data?.error || "Failed to mark follow-up completed.");
+        return;
+      }
+
+      onNotify(`Marked follow-up completed for ${lead.name}.`);
       await onReload();
     } finally {
       setSavingId(null);
@@ -135,6 +196,56 @@ export default function FollowUpsSection({
         }}
       >
         <h3 style={{ margin: 0 }}>Scheduled Follow-Ups ({scheduledFollowUps.length})</h3>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => setTimingFilter(timingFilter === "overdue" ? "all" : "overdue")}
+            style={{
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: timingFilter === "overdue" ? "2px solid #991b1b" : "1px solid #fca5a5",
+              background: "#fef2f2",
+              color: "#991b1b",
+              fontSize: 12,
+              fontWeight: "bold",
+              cursor: "pointer",
+            }}
+          >
+            Overdue: {timingCounts.overdue}
+          </button>
+          <button
+            type="button"
+            onClick={() => setTimingFilter(timingFilter === "today" ? "all" : "today")}
+            style={{
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: timingFilter === "today" ? "2px solid #92400e" : "1px solid #fcd34d",
+              background: "#fffbeb",
+              color: "#92400e",
+              fontSize: 12,
+              fontWeight: "bold",
+              cursor: "pointer",
+            }}
+          >
+            Due Today: {timingCounts.today}
+          </button>
+          <button
+            type="button"
+            onClick={() => setTimingFilter(timingFilter === "upcoming" ? "all" : "upcoming")}
+            style={{
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: timingFilter === "upcoming" ? "2px solid #166534" : "1px solid #86efac",
+              background: "#f0fdf4",
+              color: "#166534",
+              fontSize: 12,
+              fontWeight: "bold",
+              cursor: "pointer",
+            }}
+          >
+            Upcoming: {timingCounts.upcoming}
+          </button>
+        </div>
       </div>
 
       <div
@@ -177,10 +288,10 @@ export default function FollowUpsSection({
         </select>
 
         <input
-          placeholder="Search name, phone, notes..."
+          placeholder="Search name, phone, email, notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 200, padding: 5 }}
+          style={{ width: 220, padding: 5 }}
         />
 
         {(projectFilter || timingFilter !== "all" || dispositionFilter !== "all" || search) && (
@@ -220,6 +331,7 @@ export default function FollowUpsSection({
               <tr key={l.id}>
                 <td>
                   <strong>{l.name}</strong>
+                  {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
                   {l.notes && <div style={{ fontSize: 11, color: "#475569" }}>{l.notes}</div>}
                 </td>
                 <td>{l.phone}</td>
@@ -262,13 +374,22 @@ export default function FollowUpsSection({
                   </div>
                 </td>
                 <td>
-                  <button
-                    type="button"
-                    style={{ fontWeight: "bold" }}
-                    onClick={() => onDialLead?.(l)}
-                  >
-                    Dial Now
-                  </button>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      style={{ fontWeight: "bold" }}
+                      onClick={() => onDialLead?.(l)}
+                    >
+                      Dial Now
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingId === l.id}
+                      onClick={() => handleCompleteFollowUp(l)}
+                    >
+                      Complete
+                    </button>
+                  </div>
                 </td>
               </tr>
             );
