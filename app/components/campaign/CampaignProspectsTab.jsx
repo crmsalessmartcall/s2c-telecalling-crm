@@ -11,6 +11,14 @@ function toKey(raw) {
     .replace(/^_+|_+$/g, "");
 }
 
+function maskPhone(phone) {
+  const raw = String(phone || "");
+  if (!raw) return "—";
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length <= 4) return "****";
+  return `${"*".repeat(Math.max(4, digits.length - 4))}${digits.slice(-4)}`;
+}
+
 function escapeCsvCell(val) {
   const str = val === null || val === undefined ? "" : String(val);
   if (/[",\n\r]/.test(str)) {
@@ -34,6 +42,8 @@ export default function CampaignProspectsTab({
   onReloadAll,
   onNotify,
   onDialLead,
+  onPatchLeads,
+  onDeleteLeads,
 }) {
   const [prospectMode, setProspectMode] = useState("browse"); // "browse" | "add_new" | "upload_csv" | "api"
   const [browseMode, setBrowseMode] = useState("browse"); // "browse" | "all"
@@ -59,23 +69,30 @@ export default function CampaignProspectsTab({
     '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
   );
 
-  const [filters, setFilters] = useState({
+  // Draft filter inputs vs. Applied filter state (Apply button commits filters)
+  const [draftFilters, setDraftFilters] = useState({
+    status: "all",
+    disposition: "all",
+    assignedTo: "all",
+    search: "",
+  });
+  const [appliedFilters, setAppliedFilters] = useState({
     status: "all",
     disposition: "all",
     assignedTo: "all",
     search: "",
   });
 
+  // Bulk action state (Assign or Delete — applied via Apply button)
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
+  const [bulkActionType, setBulkActionType] = useState("assign"); // "assign" | "delete"
   const [targetAssigneeId, setTargetAssigneeId] = useState("");
-  const [allocating, setAllocating] = useState(false);
-  const [localAssignmentById, setLocalAssignmentById] = useState({});
-  const [localDeletedLeadIds, setLocalDeletedLeadIds] = useState([]);
+  const [applyingBulk, setApplyingBulk] = useState(false);
 
   useEffect(() => {
     setPage(1);
     setSelectedLeadIds([]);
-  }, [campaign?.id, filters, browseMode, pageSize, prospectMode]);
+  }, [campaign?.id, appliedFilters, browseMode, pageSize, prospectMode]);
 
   const userNameMap = useMemo(() => {
     const map = {};
@@ -85,34 +102,37 @@ export default function CampaignProspectsTab({
     return map;
   }, [teamUsers]);
 
-  const enrichedLeads = useMemo(() => {
-    const deletedSet = new Set(localDeletedLeadIds);
-    return (campaignLeads || [])
-      .filter((l) => !deletedSet.has(l.id))
-      .map((l) => ({
-        ...l,
-        assigned_to:
-          localAssignmentById[l.id] !== undefined ? localAssignmentById[l.id] : l.assigned_to,
-      }));
-  }, [campaignLeads, localAssignmentById, localDeletedLeadIds]);
+  // Only custom fields where Display is enabled appear on the prospect browse view
+  const displayedCustomFields = useMemo(
+    () => (callFields || []).filter((cf) => cf.is_displayed !== false),
+    [callFields]
+  );
 
   const filteredLeads = useMemo(() => {
-    return enrichedLeads.filter((lead) => {
-      if (filters.status !== "all" && (lead.status || "new") !== filters.status) return false;
-      if (filters.disposition !== "all") {
-        if (filters.disposition === "__none__" && lead.disposition) return false;
-        if (filters.disposition !== "__none__" && (lead.disposition || "") !== filters.disposition) {
+    return (campaignLeads || []).filter((lead) => {
+      if (appliedFilters.status !== "all" && (lead.status || "new") !== appliedFilters.status) {
+        return false;
+      }
+      if (appliedFilters.disposition !== "all") {
+        if (appliedFilters.disposition === "__none__" && lead.disposition) return false;
+        if (
+          appliedFilters.disposition !== "__none__" &&
+          (lead.disposition || "") !== appliedFilters.disposition
+        ) {
           return false;
         }
       }
-      if (filters.assignedTo !== "all") {
-        if (filters.assignedTo === "__unassigned__" && lead.assigned_to) return false;
-        if (filters.assignedTo !== "__unassigned__" && lead.assigned_to !== filters.assignedTo) {
+      if (appliedFilters.assignedTo !== "all") {
+        if (appliedFilters.assignedTo === "__unassigned__" && lead.assigned_to) return false;
+        if (
+          appliedFilters.assignedTo !== "__unassigned__" &&
+          lead.assigned_to !== appliedFilters.assignedTo
+        ) {
           return false;
         }
       }
-      if (filters.search.trim()) {
-        const q = filters.search.trim().toLowerCase();
+      if (appliedFilters.search.trim()) {
+        const q = appliedFilters.search.trim().toLowerCase();
         const cf =
           lead.custom_fields && typeof lead.custom_fields === "object" ? lead.custom_fields : {};
         const cfStr = Object.values(cf).join(" ").toLowerCase();
@@ -125,7 +145,7 @@ export default function CampaignProspectsTab({
       }
       return true;
     });
-  }, [enrichedLeads, filters]);
+  }, [campaignLeads, appliedFilters]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -153,11 +173,24 @@ export default function CampaignProspectsTab({
     return `curl --location --request POST '${campaignIngestUrl}' --header 'Content-Type: application/json' --data-raw '${compact}'`;
   }, [campaignIngestUrl, apiTestPayload]);
 
+  function handleApplyFilters() {
+    setAppliedFilters({ ...draftFilters });
+    setPage(1);
+    onNotify?.("Applied prospect filters.");
+  }
+
+  function handleResetFilters() {
+    const empty = { status: "all", disposition: "all", assignedTo: "all", search: "" };
+    setDraftFilters(empty);
+    setAppliedFilters(empty);
+    setPage(1);
+  }
+
   async function handleManualRefresh() {
     setRefreshing(true);
     try {
       await onReloadAll?.();
-      onNotify?.(`Refreshed live data for "${campaign.name}".`);
+      onNotify?.(`Refreshed data for "${campaign.name}".`);
     } finally {
       setRefreshing(false);
     }
@@ -325,11 +358,35 @@ export default function CampaignProspectsTab({
     await onReloadAll?.();
   }
 
-  async function handleAllocateSelected() {
-    if (selectedLeadIds.length === 0) return;
-    setAllocating(true);
-    const chosenAssignee = targetAssigneeId || null;
+  // Apply button commits selected bulk action (Assign or Delete)
+  async function handleApplyBulkAction() {
+    if (selectedLeadIds.length === 0) {
+      onNotify?.("Select at least one record first.");
+      return;
+    }
+    setApplyingBulk(true);
     try {
+      if (bulkActionType === "delete") {
+        onDeleteLeads?.(selectedLeadIds);
+        if (session?.access_token) {
+          await safeJsonFetch("/api/leads", {
+            method: "DELETE",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({ lead_ids: selectedLeadIds }),
+          });
+        }
+        const count = selectedLeadIds.length;
+        setSelectedLeadIds([]);
+        onNotify?.(`Applied delete to ${count} selected record(s).`);
+        await onReloadAll?.();
+        return;
+      }
+
+      const chosenAssignee = targetAssigneeId || null;
+      onPatchLeads?.(selectedLeadIds, { assigned_to: chosenAssignee });
       if (session?.access_token) {
         await safeJsonFetch("/api/leads", {
           method: "PATCH",
@@ -345,91 +402,17 @@ export default function CampaignProspectsTab({
           }),
         });
       }
-
-      setLocalAssignmentById((prev) => {
-        const next = { ...prev };
-        for (const id of selectedLeadIds) {
-          next[id] = chosenAssignee;
-        }
-        return next;
-      });
-
       const count = selectedLeadIds.length;
       setSelectedLeadIds([]);
       onNotify?.(
-        `Assigned ${count} lead(s) to ${
-          chosenAssignee ? userNameMap[chosenAssignee] || "selected user" : "Unassigned"
+        `Applied assignment for ${count} record(s) to ${
+          chosenAssignee ? userNameMap[chosenAssignee] || "user" : "Unassigned"
         }.`
       );
       await onReloadAll?.();
     } finally {
-      setAllocating(false);
+      setApplyingBulk(false);
     }
-  }
-
-  async function handleDeleteSelectedLeads() {
-    if (selectedLeadIds.length === 0) return;
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(`Delete ${selectedLeadIds.length} selected lead(s)?`)
-    ) {
-      return;
-    }
-    if (session?.access_token) {
-      await safeJsonFetch("/api/leads", {
-        method: "DELETE",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ lead_ids: selectedLeadIds }),
-      });
-    }
-    setLocalDeletedLeadIds((prev) => Array.from(new Set([...prev, ...selectedLeadIds])));
-    const count = selectedLeadIds.length;
-    setSelectedLeadIds([]);
-    onNotify?.(`Deleted ${count} lead(s).`);
-    await onReloadAll?.();
-  }
-
-  async function handleDeleteSingleLead(lead) {
-    if (!lead?.id) return;
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(`Delete lead "${lead.name || lead.phone}"?`)
-    ) {
-      return;
-    }
-    if (session?.access_token) {
-      await safeJsonFetch(`/api/leads?lead_id=${encodeURIComponent(lead.id)}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-    }
-    setLocalDeletedLeadIds((prev) => (prev.includes(lead.id) ? prev : [...prev, lead.id]));
-    setSelectedLeadIds((prev) => prev.filter((id) => id !== lead.id));
-    onNotify?.(`Deleted lead "${lead.name || lead.phone}".`);
-    await onReloadAll?.();
-  }
-
-  async function handleRowAssigneeChange(leadId, assigneeVal) {
-    const chosen = assigneeVal || null;
-    setLocalAssignmentById((prev) => ({ ...prev, [leadId]: chosen }));
-    if (session?.access_token) {
-      await safeJsonFetch("/api/leads", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          lead_id: leadId,
-          assigned_to: chosen,
-        }),
-      });
-      await onReloadAll?.();
-    }
-    onNotify?.(`Lead assignment updated to ${chosen ? userNameMap[chosen] || "user" : "Unassigned"}.`);
   }
 
   function handleExportCombinedCsv() {
@@ -544,7 +527,7 @@ export default function CampaignProspectsTab({
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      {/* Prospect Action Bar (No extra campaign dropdown; already inside campaign.name) */}
+      {/* Top Action Bar */}
       <div
         style={{
           padding: 12,
@@ -558,21 +541,19 @@ export default function CampaignProspectsTab({
           gap: 10,
         }}
       >
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <label style={{ fontSize: 12, fontWeight: 700 }}>
-            Prospects:{" "}
-            <select
-              value={prospectMode}
-              onChange={(e) => setProspectMode(e.target.value)}
-              style={{ padding: "6px 10px", borderRadius: 7, fontWeight: 600 }}
-            >
-              <option value="browse">Browse</option>
-              <option value="add_new">Add New</option>
-              <option value="upload_csv">Upload CSV</option>
-              <option value="api">API</option>
-            </select>
-          </label>
-        </div>
+        <label style={{ fontSize: 12, fontWeight: 700 }}>
+          Prospects:{" "}
+          <select
+            value={prospectMode}
+            onChange={(e) => setProspectMode(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 7, fontWeight: 600 }}
+          >
+            <option value="browse">Browse</option>
+            <option value="add_new">Add New</option>
+            <option value="upload_csv">Upload CSV</option>
+            <option value="api">API</option>
+          </select>
+        </label>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
@@ -855,6 +836,7 @@ export default function CampaignProspectsTab({
               gap: 10,
             }}
           >
+            {/* Filter Controls + Apply Button */}
             <div
               style={{
                 display: "flex",
@@ -866,14 +848,14 @@ export default function CampaignProspectsTab({
             >
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <input
-                  placeholder="Filter name / phone / email..."
-                  value={filters.search}
-                  onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+                  placeholder="Search name / phone / email..."
+                  value={draftFilters.search}
+                  onChange={(e) => setDraftFilters((f) => ({ ...f, search: e.target.value }))}
                   style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
                 />
                 <select
-                  value={filters.status}
-                  onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+                  value={draftFilters.status}
+                  onChange={(e) => setDraftFilters((f) => ({ ...f, status: e.target.value }))}
                 >
                   <option value="all">All Statuses</option>
                   <option value="new">new</option>
@@ -883,8 +865,8 @@ export default function CampaignProspectsTab({
                   <option value="closed">closed</option>
                 </select>
                 <select
-                  value={filters.disposition}
-                  onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+                  value={draftFilters.disposition}
+                  onChange={(e) => setDraftFilters((f) => ({ ...f, disposition: e.target.value }))}
                 >
                   <option value="all">All Dispositions</option>
                   <option value="__none__">No Disposition</option>
@@ -896,8 +878,8 @@ export default function CampaignProspectsTab({
                 </select>
                 {!isAgent && teamUsers.length > 0 && (
                   <select
-                    value={filters.assignedTo}
-                    onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
+                    value={draftFilters.assignedTo}
+                    onChange={(e) => setDraftFilters((f) => ({ ...f, assignedTo: e.target.value }))}
                   >
                     <option value="all">All Assignees</option>
                     <option value="__unassigned__">Unassigned</option>
@@ -908,6 +890,36 @@ export default function CampaignProspectsTab({
                     ))}
                   </select>
                 )}
+                <button
+                  type="button"
+                  onClick={handleApplyFilters}
+                  style={{
+                    padding: "5px 12px",
+                    borderRadius: 6,
+                    border: "1px solid #047857",
+                    background: "#059669",
+                    color: "#ffffff",
+                    fontWeight: 700,
+                    fontSize: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  Apply Filter
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetFilters}
+                  style={{
+                    padding: "5px 10px",
+                    borderRadius: 6,
+                    border: "1px solid #cbd5e1",
+                    background: "#ffffff",
+                    fontSize: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  Reset
+                </button>
               </div>
 
               <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
@@ -949,52 +961,57 @@ export default function CampaignProspectsTab({
               </div>
             </div>
 
+            {/* Bulk Assign / Delete Bar with Apply Button */}
             {!isAgent && canManageCampaign && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
-                <strong>Assign to User ({selectedLeadIds.length} selected):</strong>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  fontSize: 12,
+                }}
+              >
+                <strong>Selected ({selectedLeadIds.length}):</strong>
                 <select
-                  value={targetAssigneeId}
-                  onChange={(e) => setTargetAssigneeId(e.target.value)}
+                  value={bulkActionType}
+                  onChange={(e) => setBulkActionType(e.target.value)}
                   style={{ padding: "5px 8px", borderRadius: 6 }}
                 >
-                  <option value="">-- Unassign --</option>
-                  {teamUsers.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name || u.email}
-                    </option>
-                  ))}
+                  <option value="assign">Assign to User</option>
+                  <option value="delete">Delete Selected</option>
                 </select>
+
+                {bulkActionType === "assign" && (
+                  <select
+                    value={targetAssigneeId}
+                    onChange={(e) => setTargetAssigneeId(e.target.value)}
+                    style={{ padding: "5px 8px", borderRadius: 6 }}
+                  >
+                    <option value="">-- Unassign --</option>
+                    {teamUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.full_name || u.email}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
                 <button
                   type="button"
-                  disabled={allocating || selectedLeadIds.length === 0}
-                  onClick={handleAllocateSelected}
+                  disabled={applyingBulk || selectedLeadIds.length === 0}
+                  onClick={handleApplyBulkAction}
                   style={{
-                    padding: "5px 12px",
+                    padding: "5px 14px",
                     borderRadius: 6,
                     border: "1px solid #1d4ed8",
                     background: "#2563eb",
                     color: "#ffffff",
                     fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  {allocating ? "Assigning..." : `Assign (${selectedLeadIds.length})`}
-                </button>
-                <button
-                  type="button"
-                  disabled={selectedLeadIds.length === 0}
-                  onClick={handleDeleteSelectedLeads}
-                  style={{
-                    padding: "5px 12px",
-                    borderRadius: 6,
-                    border: "1px solid #fecaca",
-                    background: "#fef2f2",
-                    color: "#b91c1c",
-                    fontWeight: 700,
                     cursor: selectedLeadIds.length === 0 ? "not-allowed" : "pointer",
                   }}
                 >
-                  Delete Selected ({selectedLeadIds.length})
+                  {applyingBulk ? "Applying..." : "Apply"}
                 </button>
               </div>
             )}
@@ -1028,112 +1045,80 @@ export default function CampaignProspectsTab({
                 )}
                 <th>Customer</th>
                 <th>Phone</th>
-                {!isAgent && <th>Assign To</th>}
+                {displayedCustomFields.map((dcf) => (
+                  <th key={dcf.id || dcf.field_key}>{dcf.label}</th>
+                ))}
+                {!isAgent && <th>Assigned To</th>}
                 <th>Status</th>
                 <th>Disposition</th>
                 {onDialLead && <th>Call</th>}
-                {!isAgent && canManageCampaign && <th>Delete</th>}
               </tr>
             </thead>
             <tbody>
-              {displayedLeads.map((l) => (
-                <tr key={l.id}>
-                  {!isAgent && (
-                    <td style={{ textAlign: "center" }}>
-                      <input
-                        type="checkbox"
-                        checked={selectedSet.has(l.id)}
-                        onChange={() =>
-                          setSelectedLeadIds((prev) =>
-                            prev.includes(l.id) ? prev.filter((id) => id !== l.id) : [...prev, l.id]
-                          )
-                        }
-                      />
-                    </td>
-                  )}
-                  <td>
-                    <strong>{l.name}</strong>
-                    {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
-                  </td>
-                  <td><strong>{l.phone}</strong></td>
-                  {!isAgent && (
+              {displayedLeads.map((l) => {
+                const cf =
+                  l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
+                return (
+                  <tr key={l.id}>
+                    {!isAgent && (
+                      <td style={{ textAlign: "center" }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedSet.has(l.id)}
+                          onChange={() =>
+                            setSelectedLeadIds((prev) =>
+                              prev.includes(l.id) ? prev.filter((id) => id !== l.id) : [...prev, l.id]
+                            )
+                          }
+                        />
+                      </td>
+                    )}
                     <td>
-                      {teamUsers.length > 0 ? (
-                        <select
-                          value={l.assigned_to || ""}
-                          onChange={(e) => handleRowAssigneeChange(l.id, e.target.value)}
-                          style={{ padding: "4px 6px", borderRadius: 6 }}
+                      <strong>{l.name}</strong>
+                      {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
+                    </td>
+                    <td>
+                      <strong>
+                        {campaign?.hide_phone_numbers ? maskPhone(l.phone) : l.phone}
+                      </strong>
+                    </td>
+                    {displayedCustomFields.map((dcf) => (
+                      <td key={dcf.id || dcf.field_key}>
+                        {cf[dcf.field_key] ?? l[dcf.field_key] ?? "—"}
+                      </td>
+                    ))}
+                    {!isAgent && <td>{userNameMap[l.assigned_to] || "Unassigned"}</td>}
+                    <td><code>{l.status || "new"}</code></td>
+                    <td>{l.disposition || "-"}</td>
+                    {onDialLead && (
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => onDialLead(l)}
+                          style={{
+                            padding: "5px 10px",
+                            borderRadius: 6,
+                            border: "1px solid #15803d",
+                            background: "#16a34a",
+                            color: "#ffffff",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                          }}
                         >
-                          <option value="">Unassigned</option>
-                          {teamUsers.map((u) => (
-                            <option key={u.id} value={u.id}>
-                              {u.full_name || u.email}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        userNameMap[l.assigned_to] || "Unassigned"
-                      )}
-                    </td>
-                  )}
-                  <td><code>{l.status || "new"}</code></td>
-                  <td>{l.disposition || "-"}</td>
-                  {onDialLead && (
-                    <td>
-                      <button
-                        type="button"
-                        onClick={() => onDialLead(l)}
-                        style={{
-                          padding: "5px 10px",
-                          borderRadius: 6,
-                          border: "1px solid #15803d",
-                          background: "#16a34a",
-                          color: "#ffffff",
-                          fontWeight: 700,
-                          cursor: "pointer",
-                        }}
-                      >
-                        📞 Call
-                      </button>
-                    </td>
-                  )}
-                  {!isAgent && canManageCampaign && (
-                    <td>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteSingleLead(l)}
-                        style={{
-                          padding: "5px 9px",
-                          borderRadius: 6,
-                          border: "1px solid #fecaca",
-                          background: "#fef2f2",
-                          color: "#b91c1c",
-                          fontWeight: 700,
-                          fontSize: 12,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  )}
-                </tr>
-              ))}
+                          📞 Call
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
               {displayedLeads.length === 0 && (
                 <tr>
                   <td
                     colSpan={
-                      isAgent
-                        ? onDialLead
-                          ? 5
-                          : 4
-                        : canManageCampaign
-                        ? onDialLead
-                          ? 8
-                          : 7
-                        : onDialLead
-                        ? 7
-                        : 6
+                      (isAgent ? 4 : 6) +
+                      displayedCustomFields.length +
+                      (onDialLead ? 1 : 0)
                     }
                   >
                     No prospects found in "{campaign.name}".
