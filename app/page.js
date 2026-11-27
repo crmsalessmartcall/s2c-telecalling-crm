@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { safeJsonFetch } from "@/lib/crmHelpers";
 import PortalHeader from "@/app/components/PortalHeader";
@@ -129,6 +129,18 @@ export default function HomePage() {
     recent_calls: [],
   });
 
+  const selectedTenantScopeRef = useRef("");
+  const selectedProjectIdRef = useRef("");
+  const hydratedOnceRef = useRef(false);
+
+  useEffect(() => {
+    selectedTenantScopeRef.current = selectedTenantScope;
+  }, [selectedTenantScope]);
+
+  useEffect(() => {
+    selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
+
   const allowedTabs = useMemo(
     () =>
       profile?.role
@@ -182,18 +194,23 @@ export default function HomePage() {
 
   const scopedCallLogs = useMemo(() => dedupeById(callLogs || []), [callLogs]);
 
-  const loadCampaignMembers = useCallback(async (currentProfile) => {
+  const loadCampaignMembers = useCallback(async (token, currentProfile, tenantScope = "") => {
+    if (!token) return;
     try {
-      let query = supabase.from("campaign_members").select("*");
-      if (currentProfile?.tenant_id) {
-        query = query.eq("tenant_id", currentProfile.tenant_id);
-      }
-      const { data, error } = await query;
-      if (!error && Array.isArray(data)) {
-        setCampaignMembers(dedupeById(data));
+      const params = new URLSearchParams();
+      const targetTenant =
+        currentProfile?.role === "super_admin" ? tenantScope : currentProfile?.tenant_id;
+      if (targetTenant) params.set("tenant_id", targetTenant);
+      const qs = params.toString() ? `?${params.toString()}` : "";
+
+      const res = await safeJsonFetch(`/api/campaigns/members${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok && Array.isArray(res.data?.members)) {
+        setCampaignMembers(dedupeById(res.data.members));
       }
     } catch {
-      // Table may not exist yet before SQL migration runs
+      // Ignore if optional campaign_members endpoint is not present
     }
   }, []);
 
@@ -238,7 +255,7 @@ export default function HomePage() {
       const role = currentProfile.role;
 
       let tenantScope =
-        overrideTenantScope !== null ? overrideTenantScope : selectedTenantScope;
+        overrideTenantScope !== null ? overrideTenantScope : selectedTenantScopeRef.current;
 
       const tabs = ROLE_ACCESS[role] || ["Campaigns", "Dialer", "Follow-Ups"];
       const landingTab = DEFAULT_LANDING_TAB[role] || tabs[0];
@@ -246,9 +263,7 @@ export default function HomePage() {
         !forceLandingTab && prev && tabs.includes(prev) ? prev : landingTab
       );
 
-      await loadCampaignMembers(currentProfile);
-
-      let loadedTenants = tenants;
+      let loadedTenants = [];
       if (["super_admin", "platform_ops"].includes(role)) {
         const tRes = await safeJsonFetch("/api/admin/tenants", {
           headers: { Authorization: `Bearer ${token}` },
@@ -258,10 +273,13 @@ export default function HomePage() {
           setTenants(loadedTenants);
           if (role === "super_admin" && !tenantScope && loadedTenants[0]?.id) {
             tenantScope = loadedTenants[0].id;
-            setSelectedTenantScope(loadedTenants[0].id);
+            selectedTenantScopeRef.current = tenantScope;
+            setSelectedTenantScope(tenantScope);
           }
         }
       }
+
+      await loadCampaignMembers(token, currentProfile, tenantScope);
 
       if (
         ["admin", "manager", "tenant_admin", "supervisor", "team_leader"].includes(role) &&
@@ -300,10 +318,12 @@ export default function HomePage() {
             return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
           });
           setProjects(onlyActive);
+          const currentProj = selectedProjectIdRef.current;
           const activeProj =
-            selectedProjectId && onlyActive.some((p) => p.id === selectedProjectId)
-              ? selectedProjectId
+            currentProj && onlyActive.some((p) => p.id === currentProj)
+              ? currentProj
               : onlyActive[0]?.id || "";
+          selectedProjectIdRef.current = activeProj;
           setSelectedProjectId(activeProj);
           await loadCampaignAndLeadsData(
             token,
@@ -326,7 +346,7 @@ export default function HomePage() {
         }
       }
     },
-    [loadCampaignAndLeadsData, loadCampaignMembers, selectedProjectId, selectedTenantScope, tenants]
+    [loadCampaignAndLeadsData, loadCampaignMembers]
   );
 
   const hydrateSession = useCallback(
@@ -382,9 +402,14 @@ export default function HomePage() {
   );
 
   useEffect(() => {
-    hydrateSession(true);
+    if (!hydratedOnceRef.current) {
+      hydratedOnceRef.current = true;
+      hydrateSession(true);
+    }
+
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (!nextSession?.user) {
+        hydratedOnceRef.current = false;
         setSession(null);
         setProfile(null);
         setActiveTab("");
@@ -408,6 +433,7 @@ export default function HomePage() {
         setAuthError(error.message);
         return;
       }
+      hydratedOnceRef.current = true;
       await hydrateSession(true);
     } finally {
       setSubmittingLogin(false);
@@ -499,6 +525,7 @@ export default function HomePage() {
           setActiveTab(tab);
         }}
         onSignedOut={() => {
+          hydratedOnceRef.current = false;
           setSession(null);
           setProfile(null);
           setActiveTab("");
@@ -554,18 +581,20 @@ export default function HomePage() {
           campaignMembers={campaignMembers}
           selectedTenantScope={selectedTenantScope}
           onChangeTenantScope={async (nextTenant) => {
+            selectedTenantScopeRef.current = nextTenant;
             setSelectedTenantScope(nextTenant);
             await loadRoleData(session, profile, nextTenant);
           }}
           activeProjects={activeProjects}
           selectedProjectId={selectedProjectId}
           onSelectProject={async (nextProj) => {
+            selectedProjectIdRef.current = nextProj;
             setSelectedProjectId(nextProj);
             await loadCampaignAndLeadsData(
               session.access_token,
               profile,
               nextProj,
-              profile.role === "super_admin" ? selectedTenantScope : ""
+              profile.role === "super_admin" ? selectedTenantScopeRef.current : ""
             );
           }}
           projectsCountAll={projectsCountAll}
