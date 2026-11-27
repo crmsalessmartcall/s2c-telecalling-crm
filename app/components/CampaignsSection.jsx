@@ -43,7 +43,6 @@ export default function CampaignsSection({
   dispositions = [],
   leads = [],
   callLogs = [],
-  initialSubTab = "calling_data",
   onReloadAll,
   onNotify,
   onDialLead,
@@ -59,7 +58,8 @@ export default function CampaignsSection({
     "team_leader",
   ].includes(profile?.role);
 
-  const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(Boolean(selectedProjectId));
+  // Always start on the campaigns list unless user explicitly opens one
+  const [isWorkspaceOpen, setIsWorkspaceOpen] = useState(false);
   const [activeCampaignTab, setActiveCampaignTab] = useState(
     isAgent ? "pending_calls" : "setting"
   );
@@ -73,17 +73,13 @@ export default function CampaignsSection({
   const [busyProjectId, setBusyProjectId] = useState(null);
 
   const [localStatusById, setLocalStatusById] = useState({});
+  const [localCampaignPatches, setLocalCampaignPatches] = useState({});
   const [localDeletedIds, setLocalDeletedIds] = useState([]);
   const [localClonedCampaigns, setLocalClonedCampaigns] = useState([]);
   const [localMemberMap, setLocalMemberMap] = useState({});
   const [campaignConfigsById, setCampaignConfigsById] = useState({});
-
-  useEffect(() => {
-    if (initialSubTab === "settings" && !isAgent && selectedProjectId) {
-      setIsWorkspaceOpen(true);
-      setActiveCampaignTab("setting");
-    }
-  }, [initialSubTab, isAgent, selectedProjectId]);
+  const [localLeadPatches, setLocalLeadPatches] = useState({});
+  const [localDeletedLeadIds, setLocalDeletedLeadIds] = useState([]);
 
   useEffect(() => {
     if (isAgent) {
@@ -114,11 +110,24 @@ export default function CampaignsSection({
       map.set(clone.id, { ...(map.get(clone.id) || {}), ...clone });
     }
 
-    return Array.from(map.values()).map((p) => ({
-      ...p,
-      status: localStatusById[p.id] !== undefined ? localStatusById[p.id] : p.status || "active",
-    }));
-  }, [allProjects, activeProjects, localClonedCampaigns, localStatusById, localDeletedIds]);
+    return Array.from(map.values()).map((p) => {
+      const patch = localCampaignPatches[p.id] || {};
+      const status =
+        localStatusById[p.id] !== undefined
+          ? localStatusById[p.id]
+          : patch.status !== undefined
+          ? patch.status
+          : p.status || "active";
+      return { ...p, ...patch, status };
+    });
+  }, [
+    allProjects,
+    activeProjects,
+    localClonedCampaigns,
+    localCampaignPatches,
+    localStatusById,
+    localDeletedIds,
+  ]);
 
   const activeList = useMemo(
     () =>
@@ -165,7 +174,7 @@ export default function CampaignsSection({
       return {
         fields: callFields || [],
         dispositions: dispositions || [],
-        formConfig: null,
+        forms: [],
       };
     }
     const stored = campaignConfigsById[selectedProjectId];
@@ -183,14 +192,20 @@ export default function CampaignsSection({
     return {
       fields: baseFields,
       dispositions: baseDisps,
-      formConfig: stored?.formConfig || null,
+      forms: stored?.forms || [],
     };
   }, [selectedProjectId, callFields, dispositions, campaignConfigsById]);
 
   const campaignLeads = useMemo(() => {
     if (!selectedProjectId) return [];
-    return (leads || []).filter((l) => l.project_id === selectedProjectId);
-  }, [leads, selectedProjectId]);
+    const deletedSet = new Set(localDeletedLeadIds);
+    return (leads || [])
+      .filter((l) => l.project_id === selectedProjectId && !deletedSet.has(l.id))
+      .map((l) => ({
+        ...l,
+        ...(localLeadPatches[l.id] || {}),
+      }));
+  }, [leads, selectedProjectId, localLeadPatches, localDeletedLeadIds]);
 
   const assignedMemberIds = useMemo(() => {
     const set = new Set(
@@ -224,6 +239,18 @@ export default function CampaignsSection({
     setIsWorkspaceOpen(false);
   }
 
+  function patchCampaignLocal(projectId, patch) {
+    if (!projectId) return;
+    setLocalCampaignPatches((prev) => ({
+      ...prev,
+      [projectId]: {
+        ...(prev[projectId] || {}),
+        ...patch,
+        updated_at: new Date().toISOString(),
+      },
+    }));
+  }
+
   async function handleCreateCampaign(e) {
     e.preventDefault();
     if (!session?.access_token || !projectForm.name.trim()) return;
@@ -249,7 +276,9 @@ export default function CampaignsSection({
         name: payload.name,
         description: payload.description,
         status: "active",
+        hide_phone_numbers: false,
         created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       };
 
       if (!res.ok && !res.data?.project) {
@@ -307,14 +336,6 @@ export default function CampaignsSection({
 
   async function handleDeleteCampaign(project) {
     if (!project?.id) return;
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(
-        `Permanently delete campaign "${project.name}"? This cannot be undone.`
-      )
-    ) {
-      return;
-    }
     setBusyProjectId(project.id);
     try {
       if (session?.access_token) {
@@ -340,7 +361,7 @@ export default function CampaignsSection({
     }
   }
 
-  // Copies dispositions, custom fields, and form config — excludes lead/customer data
+  // Deep copy: copies dispositions (primary & secondary), custom fields, and created forms — excludes leads
   async function handleDeepCopyCampaign(sourceProject) {
     if (!sourceProject) return;
     setBusyProjectId(sourceProject.id);
@@ -356,7 +377,7 @@ export default function CampaignsSection({
           : (dispositions || []).filter(
               (d) => !d.project_id || d.project_id === sourceProject.id
             );
-      const sourceFormConfig = sourceConfig.formConfig || null;
+      const sourceForms = Array.isArray(sourceConfig.forms) ? sourceConfig.forms : [];
 
       let newCampaignId = `copy-${Date.now()}`;
       let createdCampaignRecord = {
@@ -388,45 +409,6 @@ export default function CampaignsSection({
           newCampaignId = res.data.project.id;
           createdCampaignRecord = { ...createdCampaignRecord, ...res.data.project };
         }
-
-        for (const d of sourceDisps) {
-          await safeJsonFetch("/api/call-config", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify({
-              kind: "disposition",
-              name: d.name,
-              requires_followup: Boolean(d.requires_followup),
-              project_id: newCampaignId,
-              tenant_id:
-                profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-            }),
-          });
-        }
-
-        for (const f of sourceFields) {
-          await safeJsonFetch("/api/call-config", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify({
-              kind: "field",
-              label: f.label,
-              field_key: f.field_key,
-              field_type: f.field_type || "text",
-              options: f.options || [],
-              is_editable: f.is_editable !== false,
-              project_id: newCampaignId,
-              tenant_id:
-                profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
-            }),
-          });
-        }
       }
 
       const clonedFields = sourceFields.map((f, i) => ({
@@ -434,25 +416,30 @@ export default function CampaignsSection({
         id: `${f.id || "fld"}-copy-${Date.now()}-${i}`,
         project_id: newCampaignId,
         options: Array.isArray(f.options) ? [...f.options] : [],
+        is_editable: f.is_editable !== false,
+        is_displayed: f.is_displayed !== false,
       }));
 
       const clonedDisps = sourceDisps.map((d, i) => ({
         ...d,
         id: `${d.id || "disp"}-copy-${Date.now()}-${i}`,
         project_id: newCampaignId,
+        secondary_options: Array.isArray(d.secondary_options) ? [...d.secondary_options] : [],
       }));
 
-      const clonedFormConfig = sourceFormConfig
-        ? {
-            ...sourceFormConfig,
-            fields: Array.isArray(sourceFormConfig.fields)
-              ? sourceFormConfig.fields.map((ff) => ({
-                  ...ff,
-                  options: Array.isArray(ff.options) ? [...ff.options] : [],
-                }))
-              : [],
-          }
-        : null;
+      const clonedForms = sourceForms.map((fm, i) => ({
+        ...fm,
+        id: `form-copy-${Date.now()}-${i}`,
+        linked_dispositions: Array.isArray(fm.linked_dispositions)
+          ? [...fm.linked_dispositions]
+          : [],
+        fields: Array.isArray(fm.fields)
+          ? fm.fields.map((ff) => ({
+              ...ff,
+              options: Array.isArray(ff.options) ? [...ff.options] : [],
+            }))
+          : [],
+      }));
 
       setLocalClonedCampaigns((prev) => [createdCampaignRecord, ...prev]);
       setCampaignConfigsById((prev) => ({
@@ -460,14 +447,14 @@ export default function CampaignsSection({
         [newCampaignId]: {
           fields: clonedFields,
           dispositions: clonedDisps,
-          formConfig: clonedFormConfig,
+          forms: clonedForms,
         },
       }));
 
       setListTab("active");
       setCurrentPage(1);
       onNotify?.(
-        `Copied "${sourceProject.name}" with ${clonedDisps.length} disposition(s), ${clonedFields.length} field(s), and form setup (customer data excluded).`
+        `Copied "${sourceProject.name}" with ${clonedDisps.length} disposition(s), ${clonedFields.length} field(s), and ${clonedForms.length} form(s) (leads excluded).`
       );
       await onReloadAll?.();
     } finally {
@@ -483,7 +470,7 @@ export default function CampaignsSection({
         dispositions: (dispositions || []).filter(
           (d) => !d.project_id || d.project_id === projectId
         ),
-        formConfig: null,
+        forms: [],
       };
       const next = typeof updater === "function" ? updater(current) : { ...current, ...updater };
       return { ...prev, [projectId]: next };
@@ -501,7 +488,24 @@ export default function CampaignsSection({
     }));
   }
 
-  // 1. Main Campaign Selection List (Active / Archived, Archive & Copy buttons on main list)
+  function patchLeadsLocal(leadIds, patch) {
+    const ids = Array.isArray(leadIds) ? leadIds : [leadIds];
+    setLocalLeadPatches((prev) => {
+      const next = { ...prev };
+      for (const id of ids) {
+        if (!id) continue;
+        next[id] = { ...(next[id] || {}), ...patch };
+      }
+      return next;
+    });
+  }
+
+  function deleteLeadsLocal(leadIds) {
+    const ids = Array.isArray(leadIds) ? leadIds : [leadIds];
+    setLocalDeletedLeadIds((prev) => Array.from(new Set([...prev, ...ids])));
+  }
+
+  // 1. Campaigns List View (Shown first; user must click to open a specific campaign)
   if (!isWorkspaceOpen || !activeCampaign) {
     const totalCount = projectsCountAll || combinedProjects.length;
     return (
@@ -891,7 +895,7 @@ export default function CampaignsSection({
     );
   }
 
-  // 2. Single Campaign Workspace (Opens on "Setting" first; no extra campaign switch dropdown)
+  // 2. Selected Campaign Detail View (4 Tabs: Setting, Members, Prospects, Pending Calls)
   const tabs = isAgent
     ? [
         { id: "prospects", label: "Prospects", count: campaignLeads.length },
@@ -1000,10 +1004,11 @@ export default function CampaignsSection({
           campaign={activeCampaign}
           callFields={effectiveCampaignConfig.fields}
           dispositions={effectiveCampaignConfig.dispositions}
-          formConfig={effectiveCampaignConfig.formConfig}
+          forms={effectiveCampaignConfig.forms}
           canManageCampaign={canManageCampaign}
           onReloadAll={onReloadAll}
           onNotify={onNotify}
+          onPatchCampaign={(patch) => patchCampaignLocal(activeCampaign.id, patch)}
           onUpdateCampaignConfig={(updater) =>
             updateCampaignConfigState(activeCampaign.id, updater)
           }
@@ -1026,6 +1031,7 @@ export default function CampaignsSection({
           onLocalMemberChange={(userId, isMember) =>
             updateLocalMemberState(activeCampaign.id, userId, isMember)
           }
+          onPatchLeads={patchLeadsLocal}
         />
       )}
 
@@ -1038,6 +1044,7 @@ export default function CampaignsSection({
           teamUsers={teamUsers}
           callFields={effectiveCampaignConfig.fields}
           dispositions={effectiveCampaignConfig.dispositions}
+          forms={effectiveCampaignConfig.forms}
           campaignLeads={campaignLeads}
           callLogs={callLogs}
           isAgent={isAgent}
@@ -1045,6 +1052,8 @@ export default function CampaignsSection({
           onReloadAll={onReloadAll}
           onNotify={onNotify}
           onDialLead={onDialLead}
+          onPatchLeads={patchLeadsLocal}
+          onDeleteLeads={deleteLeadsLocal}
         />
       )}
 
