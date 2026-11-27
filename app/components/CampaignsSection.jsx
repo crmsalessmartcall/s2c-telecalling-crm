@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { downloadSampleCsv, parseCsvRows, safeJsonFetch } from "@/lib/crmHelpers";
 
 function toKey(raw) {
@@ -11,26 +11,40 @@ function toKey(raw) {
     .replace(/^_+|_+$/g, "");
 }
 
+function isLeadClosed(lead) {
+  if (lead?.is_closed === true) return true;
+  const st = String(lead?.status || "").toLowerCase();
+  return ["closed", "converted", "completed", "won", "lost"].includes(st);
+}
+
 export default function CampaignsSection({
   session,
   profile,
   tenants,
+  teamUsers = [],
+  campaignMembers = [],
   selectedTenantScope,
   onChangeTenantScope,
-  activeProjects,
+  activeProjects = [],
   selectedProjectId,
   onSelectProject,
-  projectsCountAll,
-  callFields,
-  dispositions,
-  leads,
+  projectsCountAll = 0,
+  callFields = [],
+  dispositions = [],
+  leads = [],
+  initialSubTab = "calling_data",
   onReloadAll,
   onNotify,
+  onDialLead,
 }) {
-  const [subTab, setSubTab] = useState("calling_data");
+  const [subTab, setSubTab] = useState(initialSubTab);
+  const [campaignView, setCampaignView] = useState("prospects"); // "members" | "prospects" | "pending_calls"
   const [projectForm, setProjectForm] = useState({ name: "", description: "" });
   const [fieldForm, setFieldForm] = useState({ label: "", field_type: "text" });
   const [dispositionForm, setDispositionForm] = useState({ name: "", requires_followup: false });
+  const [memberSearch, setMemberSearch] = useState("");
+  const [savingMemberId, setSavingMemberId] = useState(null);
+  const [distributingLeads, setDistributingLeads] = useState(false);
 
   const [leadForm, setLeadForm] = useState({
     name: "",
@@ -38,6 +52,7 @@ export default function CampaignsSection({
     email: "",
     notes: "",
     follow_up_at: "",
+    assigned_to: "",
     custom_fields: {},
   });
 
@@ -49,16 +64,53 @@ export default function CampaignsSection({
     status: "all",
     disposition: "all",
     callKind: "all",
+    assignedTo: "all",
     paramKey: "",
     paramValue: "",
     search: "",
   });
   const [bulkFollowUpAt, setBulkFollowUpAt] = useState("");
 
+  useEffect(() => {
+    if (initialSubTab) {
+      setSubTab(initialSubTab);
+    }
+  }, [initialSubTab]);
+
   const activeCampaign = useMemo(
     () => activeProjects.find((p) => p.id === selectedProjectId) || null,
     [activeProjects, selectedProjectId]
   );
+
+  const campaignLeads = useMemo(() => {
+    if (!selectedProjectId) return leads || [];
+    return (leads || []).filter((l) => !l.project_id || l.project_id === selectedProjectId);
+  }, [leads, selectedProjectId]);
+
+  const assignedMemberIds = useMemo(() => {
+    const set = new Set(
+      (campaignMembers || [])
+        .filter((m) => m.campaign_id === selectedProjectId)
+        .map((m) => m.user_id)
+    );
+    for (const l of campaignLeads) {
+      if (l.assigned_to) set.add(l.assigned_to);
+    }
+    return set;
+  }, [campaignMembers, selectedProjectId, campaignLeads]);
+
+  const pendingCallLeads = useMemo(
+    () => campaignLeads.filter((l) => !isLeadClosed(l)),
+    [campaignLeads]
+  );
+
+  const userNameMap = useMemo(() => {
+    const map = {};
+    for (const u of teamUsers || []) {
+      map[u.id] = u.full_name || u.email || u.id;
+    }
+    return map;
+  }, [teamUsers]);
 
   const paramOptions = useMemo(() => {
     const opts = [{ key: "city", label: "City (city)" }];
@@ -71,8 +123,16 @@ export default function CampaignsSection({
   }, [callFields]);
 
   const filteredLeads = useMemo(() => {
-    return (leads || []).filter((lead) => {
+    const baseList = campaignView === "pending_calls" ? pendingCallLeads : campaignLeads;
+    return baseList.filter((lead) => {
       if (filters.status !== "all" && (lead.status || "new") !== filters.status) return false;
+
+      if (filters.assignedTo !== "all") {
+        if (filters.assignedTo === "__unassigned__" && lead.assigned_to) return false;
+        if (filters.assignedTo !== "__unassigned__" && lead.assigned_to !== filters.assignedTo) {
+          return false;
+        }
+      }
 
       if (filters.disposition !== "all") {
         if (filters.disposition === "__none__" && lead.disposition) return false;
@@ -115,7 +175,88 @@ export default function CampaignsSection({
 
       return true;
     });
-  }, [leads, filters]);
+  }, [campaignView, pendingCallLeads, campaignLeads, filters]);
+
+  const filteredMembersCandidates = useMemo(() => {
+    const q = memberSearch.trim().toLowerCase();
+    const list = teamUsers && teamUsers.length > 0 ? teamUsers : [];
+    if (!q) return list;
+    return list.filter(
+      (u) =>
+        String(u.full_name || "").toLowerCase().includes(q) ||
+        String(u.email || "").toLowerCase().includes(q) ||
+        String(u.role || "").toLowerCase().includes(q)
+    );
+  }, [teamUsers, memberSearch]);
+
+  async function handleToggleCampaignMember(userId, currentlyAssigned) {
+    if (!session?.access_token || !selectedProjectId || !userId) return;
+    setSavingMemberId(userId);
+    try {
+      const res = await safeJsonFetch("/api/campaigns/members", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          campaign_id: selectedProjectId,
+          user_id: userId,
+          action: currentlyAssigned ? "remove" : "add",
+          tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        onNotify(res.data?.error || "Failed to update campaign member.");
+        return;
+      }
+
+      onNotify(
+        currentlyAssigned
+          ? `Removed ${userNameMap[userId] || "member"} from campaign.`
+          : `Assigned ${userNameMap[userId] || "member"} to campaign.`
+      );
+      await onReloadAll();
+    } finally {
+      setSavingMemberId(null);
+    }
+  }
+
+  async function handleDistributePendingLeadsEvenly() {
+    if (!session?.access_token || !selectedProjectId) return;
+    const memberIds = Array.from(assignedMemberIds);
+    if (memberIds.length === 0) {
+      onNotify("Assign at least one member to this campaign before distributing leads.");
+      return;
+    }
+    const targetLeads = pendingCallLeads.length > 0 ? pendingCallLeads : campaignLeads;
+    if (targetLeads.length === 0) {
+      onNotify("No leads available in this campaign to distribute.");
+      return;
+    }
+
+    setDistributingLeads(true);
+    try {
+      let updatedCount = 0;
+      for (let i = 0; i < targetLeads.length; i += 1) {
+        const assigneeId = memberIds[i % memberIds.length];
+        const res = await safeJsonFetch("/api/leads", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ lead_id: targetLeads[i].id, assigned_to: assigneeId }),
+        });
+        if (res.ok) updatedCount += 1;
+      }
+      onNotify(`Distributed ${updatedCount} lead(s) across ${memberIds.length} campaign member(s).`);
+      await onReloadAll();
+    } finally {
+      setDistributingLeads(false);
+    }
+  }
 
   function handleCsvFileChange(e) {
     const file = e.target.files?.[0];
@@ -194,14 +335,14 @@ export default function CampaignsSection({
       },
       body: JSON.stringify({
         project_id: selectedProjectId || null,
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
         new_fields: newFields,
         rows: mappedRows,
       }),
     });
 
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to upload mapped CSV leads.");
+      onNotify(res.data?.error || "Failed to upload mapped CSV leads.");
       return;
     }
 
@@ -227,11 +368,11 @@ export default function CampaignsSection({
         name: projectForm.name,
         description: projectForm.description,
         status: "active",
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to create campaign.");
+      onNotify(res.data?.error || "Failed to create campaign.");
       return;
     }
     setProjectForm({ name: "", description: "" });
@@ -254,11 +395,11 @@ export default function CampaignsSection({
         name: dispositionForm.name,
         requires_followup: dispositionForm.requires_followup,
         project_id: selectedProjectId || null,
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to add disposition.");
+      onNotify(res.data?.error || "Failed to add disposition.");
       return;
     }
     setDispositionForm({ name: "", requires_followup: false });
@@ -280,11 +421,11 @@ export default function CampaignsSection({
         label: fieldForm.label,
         field_type: fieldForm.field_type,
         project_id: selectedProjectId || null,
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to add call field.");
+      onNotify(res.data?.error || "Failed to add call field.");
       return;
     }
     setFieldForm({ label: "", field_type: "text" });
@@ -303,15 +444,24 @@ export default function CampaignsSection({
       },
       body: JSON.stringify({
         ...leadForm,
+        assigned_to: leadForm.assigned_to || null,
         project_id: selectedProjectId || null,
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to add lead.");
+      onNotify(res.data?.error || "Failed to add lead.");
       return;
     }
-    setLeadForm({ name: "", phone: "", email: "", notes: "", follow_up_at: "", custom_fields: {} });
+    setLeadForm({
+      name: "",
+      phone: "",
+      email: "",
+      notes: "",
+      follow_up_at: "",
+      assigned_to: "",
+      custom_fields: {},
+    });
     onNotify(`Added lead "${res.data.lead?.name}".`);
     await onReloadAll();
   }
@@ -327,7 +477,7 @@ export default function CampaignsSection({
       body: JSON.stringify({ lead_id: leadId, ...patch }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to update lead.");
+      onNotify(res.data?.error || "Failed to update lead.");
       return;
     }
     onNotify("Lead updated.");
@@ -347,11 +497,11 @@ export default function CampaignsSection({
         lead_ids: ids,
         follow_up_at: new Date(bulkFollowUpAt).toISOString(),
         status: "follow_up",
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to set bulk follow-up.");
+      onNotify(res.data?.error || "Failed to set bulk follow-up.");
       return;
     }
     onNotify(`Follow-up scheduled for ${ids.length} filtered lead(s).`);
@@ -371,16 +521,20 @@ export default function CampaignsSection({
       },
       body: JSON.stringify({
         lead_ids: ids,
-        tenant_id: profile.role === "super_admin" ? selectedTenantScope || undefined : undefined,
+        tenant_id: profile?.role === "super_admin" ? selectedTenantScope || undefined : undefined,
       }),
     });
     if (!res.ok) {
-      onNotify(res.data.error || "Failed to delete filtered leads.");
+      onNotify(res.data?.error || "Failed to delete filtered leads.");
       return;
     }
     onNotify(`Deleted ${count} filtered lead(s).`);
     await onReloadAll();
   }
+
+  const canManageCampaign = ["super_admin", "admin", "manager", "tenant_admin", "supervisor", "team_leader"].includes(
+    profile?.role
+  );
 
   return (
     <section>
@@ -396,10 +550,10 @@ export default function CampaignsSection({
       >
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
           <h3 style={{ margin: 0 }}>
-            Active Campaigns ({activeProjects.length} / {projectsCountAll})
+            Campaigns ({activeProjects.length} / {projectsCountAll})
           </h3>
 
-          {profile.role === "super_admin" && tenants.length > 0 && (
+          {profile?.role === "super_admin" && tenants.length > 0 && (
             <label style={{ fontSize: 13 }}>
               Tenant:{" "}
               <select
@@ -438,22 +592,22 @@ export default function CampaignsSection({
               onClick={() => setSubTab("calling_data")}
               style={{ fontWeight: subTab === "calling_data" ? "bold" : "normal" }}
             >
-              Calling Data
+              Campaign Workspace
             </button>
             <button
               type="button"
               onClick={() => setSubTab("settings")}
               style={{ fontWeight: subTab === "settings" ? "bold" : "normal" }}
             >
-              Settings
+              Settings / Rules
             </button>
           </div>
         )}
       </div>
 
-      {["super_admin", "tenant_admin"].includes(profile.role) && (
+      {canManageCampaign && (
         <div style={{ marginBottom: 16, padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-          <h4 style={{ marginTop: 0 }}>Create Campaign</h4>
+          <h4 style={{ marginTop: 0 }}>Create New Campaign</h4>
           <form onSubmit={handleCreateCampaign} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input
               placeholder="Campaign Name"
@@ -462,19 +616,19 @@ export default function CampaignsSection({
               required
             />
             <input
-              placeholder="Description / Dates"
+              placeholder="Description / Requirement"
               value={projectForm.description}
               onChange={(e) => setProjectForm((f) => ({ ...f, description: e.target.value }))}
             />
-            <button type="submit">Create Campaign</button>
+            <button type="submit">Create New Campaign</button>
           </form>
         </div>
       )}
 
       {!selectedProjectId ? (
         <div style={{ padding: 16, border: "1px dashed #94a3b8", borderRadius: 8, color: "#475569" }}>
-          Select an active campaign above to access <strong>Calling Data</strong> and{" "}
-          <strong>Settings</strong>.
+          Select an active campaign above to view <strong>Members</strong>, <strong>Prospects</strong>, and{" "}
+          <strong>Pending Calls</strong>.
         </div>
       ) : subTab === "settings" ? (
         <div
@@ -548,305 +702,561 @@ export default function CampaignsSection({
         </div>
       ) : (
         <div>
+          {/* 3-Counter Campaign Header */}
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-              gap: 12,
-              marginBottom: 16,
+              gridTemplateColumns: "repeat(3, minmax(160px, 1fr))",
+              gap: 10,
+              marginBottom: 14,
             }}
           >
-            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
-              <h4 style={{ marginTop: 0 }}>Add Lead — {activeCampaign?.name}</h4>
-              <form onSubmit={handleAddSingleLead} style={{ display: "grid", gap: 8 }}>
-                <input
-                  placeholder="Customer Name"
-                  value={leadForm.name}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
-                  required
-                />
-                <input
-                  placeholder="Phone Number"
-                  value={leadForm.phone}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
-                  required
-                />
-                <input
-                  placeholder="Email (optional)"
-                  value={leadForm.email}
-                  onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
-                />
-                {callFields.map((cf) => (
-                  <input
-                    key={cf.id}
-                    placeholder={`${cf.label} (${cf.field_key})`}
-                    value={leadForm.custom_fields[cf.field_key] || ""}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setLeadForm((f) => ({
-                        ...f,
-                        custom_fields: { ...f.custom_fields, [cf.field_key]: val },
-                      }));
-                    }}
-                  />
-                ))}
-                <button type="submit">Add Lead</button>
-              </form>
-            </div>
+            <button
+              type="button"
+              onClick={() => setCampaignView("members")}
+              style={{
+                padding: 12,
+                textAlign: "left",
+                borderRadius: 8,
+                border: campaignView === "members" ? "2px solid #0f172a" : "1px solid #cbd5e1",
+                background: campaignView === "members" ? "#f1f5f9" : "#ffffff",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontSize: 12, color: "#475569" }}>Members</div>
+              <div style={{ fontSize: 20, fontWeight: "bold" }}>{assignedMemberIds.size}</div>
+            </button>
 
-            <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+            <button
+              type="button"
+              onClick={() => setCampaignView("prospects")}
+              style={{
+                padding: 12,
+                textAlign: "left",
+                borderRadius: 8,
+                border: campaignView === "prospects" ? "2px solid #0f172a" : "1px solid #cbd5e1",
+                background: campaignView === "prospects" ? "#f1f5f9" : "#ffffff",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontSize: 12, color: "#475569" }}>Prospects</div>
+              <div style={{ fontSize: 20, fontWeight: "bold" }}>{campaignLeads.length}</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setCampaignView("pending_calls")}
+              style={{
+                padding: 12,
+                textAlign: "left",
+                borderRadius: 8,
+                border: campaignView === "pending_calls" ? "2px solid #0f172a" : "1px solid #cbd5e1",
+                background: campaignView === "pending_calls" ? "#f1f5f9" : "#ffffff",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontSize: 12, color: "#475569" }}>Pending Calls</div>
+              <div style={{ fontSize: 20, fontWeight: "bold" }}>{pendingCallLeads.length}</div>
+            </button>
+          </div>
+
+          {campaignView === "members" ? (
+            <div style={{ padding: 14, border: "1px solid #cbd5e1", borderRadius: 8, marginBottom: 16 }}>
               <div
                 style={{
                   display: "flex",
                   justifyContent: "space-between",
                   alignItems: "center",
-                  marginBottom: 8,
+                  gap: 10,
+                  flexWrap: "wrap",
+                  marginBottom: 12,
                 }}
               >
-                <h4 style={{ margin: 0 }}>Bulk CSV Upload & Mapping</h4>
-                <button
-                  type="button"
-                  onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
-                >
-                  Download Sample CSV
-                </button>
-              </div>
-              <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
-
-              {csvHeaders.length > 0 && (
-                <form onSubmit={handleImportMappedCsv} style={{ marginTop: 10, display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, fontWeight: "bold" }}>
-                    Map CSV Columns ({csvRawRows.length} rows ready):
+                <div>
+                  <h4 style={{ margin: 0 }}>
+                    Campaign Members — {activeCampaign?.name} ({assignedMemberIds.size} assigned)
+                  </h4>
+                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+                    Toggle users to assign or remove access to this campaign without leaving the page.
                   </div>
-                  {csvHeaders.map((h) => {
-                    const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <input
+                    placeholder="Search user by name, email, role..."
+                    value={memberSearch}
+                    onChange={(e) => setMemberSearch(e.target.value)}
+                  />
+                  {canManageCampaign && (
+                    <button
+                      type="button"
+                      onClick={handleDistributePendingLeadsEvenly}
+                      disabled={distributingLeads || assignedMemberIds.size === 0}
+                    >
+                      {distributingLeads ? "Distributing..." : "Distribute Pending Leads"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Assignment</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredMembersCandidates.map((u) => {
+                    const isAssigned = assignedMemberIds.has(u.id);
                     return (
-                      <div key={h} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
-                        <code style={{ minWidth: 90 }}>{h}</code>
-                        <select
-                          value={entry.target}
-                          onChange={(e) =>
-                            setColumnMapping((prev) => ({
-                              ...prev,
-                              [h]: { ...entry, target: e.target.value },
-                            }))
-                          }
-                        >
-                          <option value="std:name">Name</option>
-                          <option value="std:phone">Phone</option>
-                          <option value="std:email">Email</option>
-                          <option value="std:notes">Notes</option>
-                          <option value="std:follow_up_at">Follow-Up</option>
-                          {callFields.map((cf) => (
-                            <option key={cf.id} value={`custom:${cf.field_key}`}>
-                              Project Field: {cf.label} ({cf.field_key})
-                            </option>
-                          ))}
-                          <option value="new_field">+ Create New Project Field</option>
-                          <option value="ignore">Ignore</option>
-                        </select>
-                        {entry.target === "new_field" && (
-                          <input
-                            placeholder="New field name"
-                            value={entry.newFieldName}
-                            onChange={(e) =>
-                              setColumnMapping((prev) => ({
-                                ...prev,
-                                [h]: { ...entry, newFieldName: e.target.value },
-                              }))
-                            }
-                            style={{ width: 120 }}
-                          />
-                        )}
-                      </div>
+                      <tr key={u.id}>
+                        <td>
+                          <strong>{u.full_name || u.email}</strong>
+                        </td>
+                        <td>{u.email}</td>
+                        <td>
+                          <code>{u.role}</code>
+                        </td>
+                        <td>{isAssigned ? "Assigned Member" : "Not Assigned"}</td>
+                        <td>
+                          <button
+                            type="button"
+                            disabled={!canManageCampaign || savingMemberId === u.id}
+                            onClick={() => handleToggleCampaignMember(u.id, isAssigned)}
+                          >
+                            {savingMemberId === u.id
+                              ? "Saving..."
+                              : isAssigned
+                              ? "Remove Member"
+                              : "Add Member"}
+                          </button>
+                        </td>
+                      </tr>
                     );
                   })}
-                  <button type="submit" style={{ fontWeight: "bold", marginTop: 4 }}>
-                    Import Mapped Leads
-                  </button>
-                </form>
-              )}
+                  {filteredMembersCandidates.length === 0 && (
+                    <tr>
+                      <td colSpan="5">No team members found for current scope.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-          </div>
-
-          <div
-            style={{
-              padding: 10,
-              border: "1px solid #cbd5e1",
-              borderRadius: 8,
-              background: "#f8fafc",
-              marginBottom: 12,
-              display: "grid",
-              gap: 8,
-            }}
-          >
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <select
-                value={filters.status}
-                onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
-              >
-                <option value="all">All Statuses</option>
-                <option value="new">new</option>
-                <option value="contacted">contacted</option>
-                <option value="follow_up">follow_up</option>
-                <option value="converted">converted</option>
-                <option value="closed">closed</option>
-              </select>
-
-              <select
-                value={filters.callKind}
-                onChange={(e) => setFilters((f) => ({ ...f, callKind: e.target.value }))}
-              >
-                <option value="all">All Leads</option>
-                <option value="fresh">Only Fresh Call</option>
-                <option value="followup">Only Follow-Up Call</option>
-                <option value="fresh_and_followup">Fresh & Follow-Up Call</option>
-              </select>
-
-              <select
-                value={filters.disposition}
-                onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
-              >
-                <option value="all">All Dispositions</option>
-                <option value="__none__">No Disposition</option>
-                {dispositions.map((d) => (
-                  <option key={d.id} value={d.name}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={filters.paramKey}
-                onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
-              >
-                <option value="">Parameter Filter</option>
-                {paramOptions.map((po) => (
-                  <option key={po.key} value={po.key}>
-                    {po.label}
-                  </option>
-                ))}
-              </select>
-
-              <input
-                placeholder="Parameter value"
-                value={filters.paramValue}
-                onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
-                style={{ width: 140 }}
-              />
-
-              <input
-                placeholder="Search name / phone..."
-                value={filters.search}
-                onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
-                style={{ width: 170 }}
-              />
-            </div>
-
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontSize: 12, fontWeight: "bold" }}>
-                Bulk ({filteredLeads.length} filtered):
-              </span>
-              <input
-                type="datetime-local"
-                value={bulkFollowUpAt}
-                onChange={(e) => setBulkFollowUpAt(e.target.value)}
-              />
-              <button
-                type="button"
-                onClick={handleBulkSetFollowUp}
-                disabled={!bulkFollowUpAt || filteredLeads.length === 0}
-              >
-                Bulk Set Follow-Up
-              </button>
-              <button
-                type="button"
-                onClick={handleBulkDeleteFiltered}
-                disabled={filteredLeads.length === 0}
-                style={{ color: "#991b1b" }}
-              >
-                Delete Filtered
-              </button>
-            </div>
-          </div>
-
-          <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr>
-                <th>Customer</th>
-                <th>Phone</th>
-                <th>Parameters</th>
-                <th>Status</th>
-                <th>Last Disposition</th>
-                <th>Follow-Up</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredLeads.map((l) => {
-                const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
-                const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
-                return (
-                  <tr key={l.id}>
-                    <td>
-                      <strong>{l.name}</strong>
-                      {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
-                    </td>
-                    <td>{l.phone}</td>
-                    <td>
-                      {entries.length > 0
-                        ? entries.map(([k, v]) => (
-                            <div key={k} style={{ fontSize: 12 }}>
-                              <code>{k}</code>: <strong>{String(v)}</strong>
-                            </div>
-                          ))
-                        : "-"}
-                    </td>
-                    <td>
-                      <select
-                        value={l.status || "new"}
-                        onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
-                      >
-                        <option value="new">new</option>
-                        <option value="contacted">contacted</option>
-                        <option value="follow_up">follow_up</option>
-                        <option value="converted">converted</option>
-                        <option value="closed">closed</option>
-                      </select>
-                    </td>
-                    <td>
-                      <select
-                        value={l.disposition || ""}
-                        onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
-                      >
-                        <option value="">-- None --</option>
-                        {dispositions.map((d) => (
-                          <option key={d.id} value={d.name}>
-                            {d.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td>
+          ) : (
+            <div>
+              {campaignView === "prospects" && (
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+                    gap: 12,
+                    marginBottom: 16,
+                  }}
+                >
+                  <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                    <h4 style={{ marginTop: 0 }}>Add New Prospect — {activeCampaign?.name}</h4>
+                    <form onSubmit={handleAddSingleLead} style={{ display: "grid", gap: 8 }}>
                       <input
-                        type="datetime-local"
-                        value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
-                        onChange={(e) =>
-                          handleUpdateLead(l.id, {
-                            follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
-                          })
-                        }
+                        placeholder="Customer Name"
+                        value={leadForm.name}
+                        onChange={(e) => setLeadForm((f) => ({ ...f, name: e.target.value }))}
+                        required
                       />
-                    </td>
-                  </tr>
-                );
-              })}
-              {filteredLeads.length === 0 && (
-                <tr>
-                  <td colSpan="6">No leads match the selected filters.</td>
-                </tr>
+                      <input
+                        placeholder="Phone Number"
+                        value={leadForm.phone}
+                        onChange={(e) => setLeadForm((f) => ({ ...f, phone: e.target.value }))}
+                        required
+                      />
+                      <input
+                        placeholder="Email (optional)"
+                        value={leadForm.email}
+                        onChange={(e) => setLeadForm((f) => ({ ...f, email: e.target.value }))}
+                      />
+                      {teamUsers.length > 0 && (
+                        <select
+                          value={leadForm.assigned_to}
+                          onChange={(e) => setLeadForm((f) => ({ ...f, assigned_to: e.target.value }))}
+                        >
+                          <option value="">Unassigned Pool</option>
+                          {teamUsers.map((u) => (
+                            <option key={u.id} value={u.id}>
+                              Assign to: {u.full_name || u.email} ({u.role})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {callFields.map((cf) => (
+                        <input
+                          key={cf.id}
+                          placeholder={`${cf.label} (${cf.field_key})`}
+                          value={leadForm.custom_fields[cf.field_key] || ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setLeadForm((f) => ({
+                              ...f,
+                              custom_fields: { ...f.custom_fields, [cf.field_key]: val },
+                            }));
+                          }}
+                        />
+                      ))}
+                      <button type="submit">Add Prospect</button>
+                    </form>
+                  </div>
+
+                  <div style={{ padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 8,
+                      }}
+                    >
+                      <h4 style={{ margin: 0 }}>Bulk CSV Upload & Mapping</h4>
+                      <button
+                        type="button"
+                        onClick={() => downloadSampleCsv(activeCampaign?.name, callFields)}
+                      >
+                        Download Sample CSV
+                      </button>
+                    </div>
+                    <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
+
+                    {csvHeaders.length > 0 && (
+                      <form onSubmit={handleImportMappedCsv} style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                        <div style={{ fontSize: 12, fontWeight: "bold" }}>
+                          Map CSV Columns ({csvRawRows.length} rows ready):
+                        </div>
+                        {csvHeaders.map((h) => {
+                          const entry = columnMapping[h] || { target: "ignore", newFieldName: h };
+                          return (
+                            <div key={h} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                              <code style={{ minWidth: 90 }}>{h}</code>
+                              <select
+                                value={entry.target}
+                                onChange={(e) =>
+                                  setColumnMapping((prev) => ({
+                                    ...prev,
+                                    [h]: { ...entry, target: e.target.value },
+                                  }))
+                                }
+                              >
+                                <option value="std:name">Name</option>
+                                <option value="std:phone">Phone</option>
+                                <option value="std:email">Email</option>
+                                <option value="std:notes">Notes</option>
+                                <option value="std:follow_up_at">Follow-Up</option>
+                                {callFields.map((cf) => (
+                                  <option key={cf.id} value={`custom:${cf.field_key}`}>
+                                    Project Field: {cf.label} ({cf.field_key})
+                                  </option>
+                                ))}
+                                <option value="new_field">+ Create New Project Field</option>
+                                <option value="ignore">Ignore</option>
+                              </select>
+                              {entry.target === "new_field" && (
+                                <input
+                                  placeholder="New field name"
+                                  value={entry.newFieldName}
+                                  onChange={(e) =>
+                                    setColumnMapping((prev) => ({
+                                      ...prev,
+                                      [h]: { ...entry, newFieldName: e.target.value },
+                                    }))
+                                  }
+                                  style={{ width: 120 }}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                        <button type="submit" style={{ fontWeight: "bold", marginTop: 4 }}>
+                          Import Mapped Leads
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                </div>
               )}
-            </tbody>
-          </table>
+
+              {campaignView === "pending_calls" && (
+                <div
+                  style={{
+                    padding: 12,
+                    border: "1px solid #cbd5e1",
+                    borderRadius: 8,
+                    marginBottom: 12,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: 10,
+                  }}
+                >
+                  <div>
+                    <strong>Pending Calls Queue — {activeCampaign?.name}</strong>{" "}
+                    <span style={{ fontSize: 13, color: "#475569" }}>
+                      ({filteredLeads.length} matching of {pendingCallLeads.length} pending)
+                    </span>
+                  </div>
+                  {onDialLead && filteredLeads.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => onDialLead(filteredLeads[0])}
+                      style={{
+                        padding: "7px 14px",
+                        fontWeight: "bold",
+                        background: "#166534",
+                        color: "#ffffff",
+                        border: "none",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Start Calling ({filteredLeads[0].name})
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div
+                style={{
+                  padding: 10,
+                  border: "1px solid #cbd5e1",
+                  borderRadius: 8,
+                  background: "#f8fafc",
+                  marginBottom: 12,
+                  display: "grid",
+                  gap: 8,
+                }}
+              >
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select
+                    value={filters.status}
+                    onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+                  >
+                    <option value="all">All Statuses</option>
+                    <option value="new">new</option>
+                    <option value="contacted">contacted</option>
+                    <option value="follow_up">follow_up</option>
+                    <option value="converted">converted</option>
+                    <option value="closed">closed</option>
+                  </select>
+
+                  {teamUsers.length > 0 && (
+                    <select
+                      value={filters.assignedTo}
+                      onChange={(e) => setFilters((f) => ({ ...f, assignedTo: e.target.value }))}
+                    >
+                      <option value="all">All Assignees</option>
+                      <option value="__unassigned__">Unassigned Pool</option>
+                      {teamUsers.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.full_name || u.email}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <select
+                    value={filters.callKind}
+                    onChange={(e) => setFilters((f) => ({ ...f, callKind: e.target.value }))}
+                  >
+                    <option value="all">All Leads</option>
+                    <option value="fresh">Only Fresh Call</option>
+                    <option value="followup">Only Follow-Up Call</option>
+                    <option value="fresh_and_followup">Fresh & Follow-Up Call</option>
+                  </select>
+
+                  <select
+                    value={filters.disposition}
+                    onChange={(e) => setFilters((f) => ({ ...f, disposition: e.target.value }))}
+                  >
+                    <option value="all">All Dispositions</option>
+                    <option value="__none__">No Disposition</option>
+                    {dispositions.map((d) => (
+                      <option key={d.id} value={d.name}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={filters.paramKey}
+                    onChange={(e) => setFilters((f) => ({ ...f, paramKey: e.target.value }))}
+                  >
+                    <option value="">Parameter Filter</option>
+                    {paramOptions.map((po) => (
+                      <option key={po.key} value={po.key}>
+                        {po.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    placeholder="Parameter value"
+                    value={filters.paramValue}
+                    onChange={(e) => setFilters((f) => ({ ...f, paramValue: e.target.value }))}
+                    style={{ width: 140 }}
+                  />
+
+                  <input
+                    placeholder="Search name / phone..."
+                    value={filters.search}
+                    onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+                    style={{ width: 170 }}
+                  />
+                </div>
+
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, fontWeight: "bold" }}>
+                    Bulk ({filteredLeads.length} filtered):
+                  </span>
+                  <input
+                    type="datetime-local"
+                    value={bulkFollowUpAt}
+                    onChange={(e) => setBulkFollowUpAt(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleBulkSetFollowUp}
+                    disabled={!bulkFollowUpAt || filteredLeads.length === 0}
+                  >
+                    Bulk Set Follow-Up
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBulkDeleteFiltered}
+                    disabled={filteredLeads.length === 0}
+                    style={{ color: "#991b1b" }}
+                  >
+                    Delete Filtered
+                  </button>
+                </div>
+              </div>
+
+              <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    <th>Customer</th>
+                    <th>Phone</th>
+                    <th>Assigned To</th>
+                    <th>Parameters</th>
+                    <th>Status</th>
+                    <th>Last Disposition</th>
+                    <th>Follow-Up</th>
+                    {onDialLead && <th>Call</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredLeads.map((l) => {
+                    const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
+                    const entries = Object.entries(cf).filter(([, v]) => v !== "" && v != null);
+                    return (
+                      <tr key={l.id}>
+                        <td>
+                          <strong>{l.name}</strong>
+                          {l.email && <div style={{ fontSize: 11, color: "#64748b" }}>{l.email}</div>}
+                        </td>
+                        <td>{l.phone}</td>
+                        <td>
+                          {teamUsers.length > 0 ? (
+                            <select
+                              value={l.assigned_to || ""}
+                              onChange={(e) =>
+                                handleUpdateLead(l.id, { assigned_to: e.target.value || null })
+                              }
+                            >
+                              <option value="">Unassigned</option>
+                              {teamUsers.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.full_name || u.email}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            userNameMap[l.assigned_to] || "Unassigned"
+                          )}
+                        </td>
+                        <td>
+                          {entries.length > 0
+                            ? entries.map(([k, v]) => (
+                                <div key={k} style={{ fontSize: 12 }}>
+                                  <code>{k}</code>: <strong>{String(v)}</strong>
+                                </div>
+                              ))
+                            : "-"}
+                        </td>
+                        <td>
+                          <select
+                            value={l.status || "new"}
+                            onChange={(e) => handleUpdateLead(l.id, { status: e.target.value })}
+                          >
+                            <option value="new">new</option>
+                            <option value="contacted">contacted</option>
+                            <option value="follow_up">follow_up</option>
+                            <option value="converted">converted</option>
+                            <option value="closed">closed</option>
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            value={l.disposition || ""}
+                            onChange={(e) => handleUpdateLead(l.id, { disposition: e.target.value || null })}
+                          >
+                            <option value="">-- None --</option>
+                            {dispositions.map((d) => (
+                              <option key={d.id} value={d.name}>
+                                {d.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            type="datetime-local"
+                            value={l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ""}
+                            onChange={(e) =>
+                              handleUpdateLead(l.id, {
+                                follow_up_at: e.target.value ? new Date(e.target.value).toISOString() : null,
+                              })
+                            }
+                          />
+                        </td>
+                        {onDialLead && (
+                          <td>
+                            <button
+                              type="button"
+                              onClick={() => onDialLead(l)}
+                              style={{
+                                padding: "5px 10px",
+                                background: "#166534",
+                                color: "#ffffff",
+                                border: "none",
+                                borderRadius: 4,
+                                cursor: "pointer",
+                              }}
+                            >
+                              Call
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                  {filteredLeads.length === 0 && (
+                    <tr>
+                      <td colSpan={onDialLead ? "8" : "7"}>No leads match the selected filters.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </section>
