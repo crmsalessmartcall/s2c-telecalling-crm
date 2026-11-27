@@ -22,12 +22,8 @@ function escapeCsvCell(val) {
 export default function CampaignProspectsTab({
   session,
   profile,
-  tenants = [],
   selectedTenantScope,
-  onChangeTenantScope,
-  activeProjects = [],
   campaign,
-  onSelectCampaign,
   teamUsers = [],
   callFields = [],
   dispositions = [],
@@ -38,18 +34,13 @@ export default function CampaignProspectsTab({
   onReloadAll,
   onNotify,
   onDialLead,
-  onAddCustomField,
-  onAddDisposition,
 }) {
-  // Dropdown action selector: "browse" | "add_new" | "upload_csv" | "api"
-  const [prospectMode, setProspectMode] = useState("browse");
-  const [settingsRuleMenu, setSettingsRuleMenu] = useState(""); // "" | "disposition" | "campaign" | "custom_field" | "create_form"
+  const [prospectMode, setProspectMode] = useState("browse"); // "browse" | "add_new" | "upload_csv" | "api"
   const [browseMode, setBrowseMode] = useState("browse"); // "browse" | "all"
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Add new prospect state
   const [leadForm, setLeadForm] = useState({
     name: "",
     phone: "",
@@ -59,23 +50,15 @@ export default function CampaignProspectsTab({
     custom_fields: {},
   });
 
-  // CSV upload state
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [csvRawRows, setCsvRawRows] = useState([]);
   const [columnMapping, setColumnMapping] = useState({});
   const [importingRows, setImportingRows] = useState(false);
 
-  // API state
   const [apiTestPayload, setApiTestPayload] = useState(
     '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
   );
 
-  // Quick rule additions from Settings / Rules dropdown
-  const [quickDispName, setQuickDispName] = useState("");
-  const [quickFieldLabel, setQuickFieldLabel] = useState("");
-  const [quickFieldType, setQuickFieldType] = useState("text");
-
-  // Filters & Assignment
   const [filters, setFilters] = useState({
     status: "all",
     disposition: "all",
@@ -87,6 +70,7 @@ export default function CampaignProspectsTab({
   const [targetAssigneeId, setTargetAssigneeId] = useState("");
   const [allocating, setAllocating] = useState(false);
   const [localAssignmentById, setLocalAssignmentById] = useState({});
+  const [localDeletedLeadIds, setLocalDeletedLeadIds] = useState([]);
 
   useEffect(() => {
     setPage(1);
@@ -101,15 +85,16 @@ export default function CampaignProspectsTab({
     return map;
   }, [teamUsers]);
 
-  const enrichedLeads = useMemo(
-    () =>
-      (campaignLeads || []).map((l) => ({
+  const enrichedLeads = useMemo(() => {
+    const deletedSet = new Set(localDeletedLeadIds);
+    return (campaignLeads || [])
+      .filter((l) => !deletedSet.has(l.id))
+      .map((l) => ({
         ...l,
         assigned_to:
           localAssignmentById[l.id] !== undefined ? localAssignmentById[l.id] : l.assigned_to,
-      })),
-    [campaignLeads, localAssignmentById]
-  );
+      }));
+  }, [campaignLeads, localAssignmentById, localDeletedLeadIds]);
 
   const filteredLeads = useMemo(() => {
     return enrichedLeads.filter((lead) => {
@@ -382,6 +367,51 @@ export default function CampaignProspectsTab({
     }
   }
 
+  async function handleDeleteSelectedLeads() {
+    if (selectedLeadIds.length === 0) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`Delete ${selectedLeadIds.length} selected lead(s)?`)
+    ) {
+      return;
+    }
+    if (session?.access_token) {
+      await safeJsonFetch("/api/leads", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ lead_ids: selectedLeadIds }),
+      });
+    }
+    setLocalDeletedLeadIds((prev) => Array.from(new Set([...prev, ...selectedLeadIds])));
+    const count = selectedLeadIds.length;
+    setSelectedLeadIds([]);
+    onNotify?.(`Deleted ${count} lead(s).`);
+    await onReloadAll?.();
+  }
+
+  async function handleDeleteSingleLead(lead) {
+    if (!lead?.id) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`Delete lead "${lead.name || lead.phone}"?`)
+    ) {
+      return;
+    }
+    if (session?.access_token) {
+      await safeJsonFetch(`/api/leads?lead_id=${encodeURIComponent(lead.id)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+    }
+    setLocalDeletedLeadIds((prev) => (prev.includes(lead.id) ? prev : [...prev, lead.id]));
+    setSelectedLeadIds((prev) => prev.filter((id) => id !== lead.id));
+    onNotify?.(`Deleted lead "${lead.name || lead.phone}".`);
+    await onReloadAll?.();
+  }
+
   async function handleRowAssigneeChange(leadId, assigneeVal) {
     const chosen = assigneeVal || null;
     setLocalAssignmentById((prev) => ({ ...prev, [leadId]: chosen }));
@@ -402,7 +432,6 @@ export default function CampaignProspectsTab({
     onNotify?.(`Lead assignment updated to ${chosen ? userNameMap[chosen] || "user" : "Unassigned"}.`);
   }
 
-  // Combined CSV Export: merges Lead data + Calling data in one CSV
   function handleExportCombinedCsv() {
     const logsByLeadId = new Map();
     const logsByPhone = new Map();
@@ -510,14 +539,12 @@ export default function CampaignProspectsTab({
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
 
-    onNotify?.(
-      `Exported ${rows.length} lead(s) with calling data into "${link.download}".`
-    );
+    onNotify?.(`Exported ${rows.length} lead(s) with calling data into "${link.download}".`);
   }
 
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      {/* Top Action Bar: Prospect Mode Dropdown, Campaign Dropdown, Settings/Rules Dropdown, Refresh & Export CSV */}
+      {/* Prospect Action Bar (No extra campaign dropdown; already inside campaign.name) */}
       <div
         style={{
           padding: 12,
@@ -533,69 +560,18 @@ export default function CampaignProspectsTab({
       >
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <label style={{ fontSize: 12, fontWeight: 700 }}>
-            Prospects Action:{" "}
+            Prospects:{" "}
             <select
               value={prospectMode}
               onChange={(e) => setProspectMode(e.target.value)}
               style={{ padding: "6px 10px", borderRadius: 7, fontWeight: 600 }}
             >
-              <option value="browse">1. Browse Prospects</option>
-              <option value="add_new">2. Add New</option>
-              <option value="upload_csv">3. Upload CSV</option>
-              <option value="api">4. API</option>
+              <option value="browse">Browse</option>
+              <option value="add_new">Add New</option>
+              <option value="upload_csv">Upload CSV</option>
+              <option value="api">API</option>
             </select>
           </label>
-
-          {activeProjects.length > 0 && (
-            <label style={{ fontSize: 12, fontWeight: 700 }}>
-              Campaign:{" "}
-              <select
-                value={campaign?.id || ""}
-                onChange={(e) => onSelectCampaign?.(e.target.value)}
-                style={{ padding: "6px 10px", borderRadius: 7 }}
-              >
-                {activeProjects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-
-          {profile?.role === "super_admin" && (tenants || []).length > 0 && (
-            <label style={{ fontSize: 12, fontWeight: 700 }}>
-              Tenant:{" "}
-              <select
-                value={selectedTenantScope}
-                onChange={(e) => onChangeTenantScope?.(e.target.value)}
-                style={{ padding: "6px 10px", borderRadius: 7 }}
-              >
-                {tenants.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    #{t.numeric_id} {t.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-
-          {!isAgent && (
-            <label style={{ fontSize: 12, fontWeight: 700 }}>
-              Settings / Rules:{" "}
-              <select
-                value={settingsRuleMenu}
-                onChange={(e) => setSettingsRuleMenu(e.target.value)}
-                style={{ padding: "6px 10px", borderRadius: 7 }}
-              >
-                <option value="">-- Select Rule --</option>
-                <option value="disposition">Disposition</option>
-                <option value="campaign">Campaign</option>
-                <option value="custom_field">Custom Field</option>
-                <option value="create_form">Create Form</option>
-              </select>
-            </label>
-          )}
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -635,122 +611,7 @@ export default function CampaignProspectsTab({
         </div>
       </div>
 
-      {/* Quick Rule Panel when Settings / Rules dropdown is chosen */}
-      {!isAgent && settingsRuleMenu && (
-        <div
-          style={{
-            padding: 14,
-            border: "1px solid #cbd5e1",
-            borderRadius: 10,
-            background: "#f8fafc",
-            display: "grid",
-            gap: 10,
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <strong style={{ fontSize: 13 }}>
-              Rule Quick Setup:{" "}
-              {settingsRuleMenu === "disposition"
-                ? "Disposition"
-                : settingsRuleMenu === "campaign"
-                ? "Campaign"
-                : settingsRuleMenu === "custom_field"
-                ? "Custom Field"
-                : "Create Form"}
-            </strong>
-            <button
-              type="button"
-              onClick={() => setSettingsRuleMenu("")}
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontWeight: 700 }}
-            >
-              ✕
-            </button>
-          </div>
-
-          {settingsRuleMenu === "disposition" && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!quickDispName.trim()) return;
-                onAddDisposition?.({
-                  id: `disp-${Date.now()}`,
-                  name: quickDispName.trim(),
-                  requires_followup: false,
-                  project_id: campaign.id,
-                });
-                onNotify?.(`Added disposition "${quickDispName.trim()}".`);
-                setQuickDispName("");
-              }}
-              style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
-            >
-              <input
-                placeholder="New disposition name"
-                value={quickDispName}
-                onChange={(e) => setQuickDispName(e.target.value)}
-                style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-              />
-              <button type="submit" style={{ padding: "6px 12px", borderRadius: 6, cursor: "pointer" }}>
-                Add Disposition
-              </button>
-            </form>
-          )}
-
-          {settingsRuleMenu === "custom_field" && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!quickFieldLabel.trim()) return;
-                onAddCustomField?.({
-                  id: `fld-${Date.now()}`,
-                  label: quickFieldLabel.trim(),
-                  field_key: toKey(quickFieldLabel.trim()),
-                  field_type: quickFieldType,
-                  is_editable: true,
-                  project_id: campaign.id,
-                });
-                onNotify?.(`Added custom field "${quickFieldLabel.trim()}".`);
-                setQuickFieldLabel("");
-              }}
-              style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
-            >
-              <input
-                placeholder="Custom field label"
-                value={quickFieldLabel}
-                onChange={(e) => setQuickFieldLabel(e.target.value)}
-                style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
-              />
-              <select
-                value={quickFieldType}
-                onChange={(e) => setQuickFieldType(e.target.value)}
-                style={{ padding: "6px 8px", borderRadius: 6 }}
-              >
-                <option value="text">Text</option>
-                <option value="number">Number / Amount</option>
-                <option value="select">Dropdown</option>
-                <option value="radio">Radio</option>
-              </select>
-              <button type="submit" style={{ padding: "6px 12px", borderRadius: 6, cursor: "pointer" }}>
-                Add Field
-              </button>
-            </form>
-          )}
-
-          {settingsRuleMenu === "campaign" && (
-            <div style={{ fontSize: 13 }}>
-              Campaign: <strong>{campaign.name}</strong> — Status: <code>{campaign.status || "active"}</code>
-            </div>
-          )}
-
-          {settingsRuleMenu === "create_form" && (
-            <div style={{ fontSize: 13 }}>
-              Switch to the <strong>Campaign</strong> tab to customize and submit the campaign form
-              below disposition.
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Mode 2: Add New */}
+      {/* Add New */}
       {prospectMode === "add_new" && !isAgent && (
         <div
           style={{
@@ -837,7 +698,7 @@ export default function CampaignProspectsTab({
         </div>
       )}
 
-      {/* Mode 3: Upload CSV */}
+      {/* Upload CSV */}
       {prospectMode === "upload_csv" && !isAgent && (
         <div
           style={{
@@ -910,7 +771,7 @@ export default function CampaignProspectsTab({
         </div>
       )}
 
-      {/* Mode 4: API */}
+      {/* API */}
       {prospectMode === "api" && !isAgent && (
         <div
           style={{
@@ -981,7 +842,7 @@ export default function CampaignProspectsTab({
         </div>
       )}
 
-      {/* Mode 1 (Default): Browse / Prospects List + Filters + Lead Assignment + Pagination */}
+      {/* Browse */}
       {prospectMode === "browse" && (
         <>
           <div
@@ -1090,7 +951,7 @@ export default function CampaignProspectsTab({
 
             {!isAgent && canManageCampaign && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
-                <strong>Assign Leads ({selectedLeadIds.length} selected):</strong>
+                <strong>Assign to User ({selectedLeadIds.length} selected):</strong>
                 <select
                   value={targetAssigneeId}
                   onChange={(e) => setTargetAssigneeId(e.target.value)}
@@ -1117,7 +978,23 @@ export default function CampaignProspectsTab({
                     cursor: "pointer",
                   }}
                 >
-                  {allocating ? "Assigning..." : `Assign Selected (${selectedLeadIds.length})`}
+                  {allocating ? "Assigning..." : `Assign (${selectedLeadIds.length})`}
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedLeadIds.length === 0}
+                  onClick={handleDeleteSelectedLeads}
+                  style={{
+                    padding: "5px 12px",
+                    borderRadius: 6,
+                    border: "1px solid #fecaca",
+                    background: "#fef2f2",
+                    color: "#b91c1c",
+                    fontWeight: 700,
+                    cursor: selectedLeadIds.length === 0 ? "not-allowed" : "pointer",
+                  }}
+                >
+                  Delete Selected ({selectedLeadIds.length})
                 </button>
               </div>
             )}
@@ -1151,10 +1028,11 @@ export default function CampaignProspectsTab({
                 )}
                 <th>Customer</th>
                 <th>Phone</th>
-                {!isAgent && <th>Assigned To</th>}
+                {!isAgent && <th>Assign To</th>}
                 <th>Status</th>
                 <th>Disposition</th>
                 {onDialLead && <th>Call</th>}
+                {!isAgent && canManageCampaign && <th>Delete</th>}
               </tr>
             </thead>
             <tbody>
@@ -1219,11 +1097,45 @@ export default function CampaignProspectsTab({
                       </button>
                     </td>
                   )}
+                  {!isAgent && canManageCampaign && (
+                    <td>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSingleLead(l)}
+                        style={{
+                          padding: "5px 9px",
+                          borderRadius: 6,
+                          border: "1px solid #fecaca",
+                          background: "#fef2f2",
+                          color: "#b91c1c",
+                          fontWeight: 700,
+                          fontSize: 12,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
               {displayedLeads.length === 0 && (
                 <tr>
-                  <td colSpan={isAgent ? (onDialLead ? 5 : 4) : onDialLead ? 7 : 6}>
+                  <td
+                    colSpan={
+                      isAgent
+                        ? onDialLead
+                          ? 5
+                          : 4
+                        : canManageCampaign
+                        ? onDialLead
+                          ? 8
+                          : 7
+                        : onDialLead
+                        ? 7
+                        : 6
+                    }
+                  >
                     No prospects found in "{campaign.name}".
                   </td>
                 </tr>
