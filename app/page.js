@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { safeJsonFetch } from "@/lib/crmHelpers";
 import PortalHeader from "@/app/components/PortalHeader";
@@ -89,6 +89,7 @@ export default function HomePage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [submittingLogin, setSubmittingLogin] = useState(false);
 
   const [activeTab, setActiveTab] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
@@ -99,7 +100,12 @@ export default function HomePage() {
 
   const [teamUsers, setTeamUsers] = useState([]);
   const [tenantLicenseHistory, setTenantLicenseHistory] = useState([]);
-  const [licenseInfo, setLicenseInfo] = useState({ used: 0, max: 0, remaining: 0, overCapacity: 0 });
+  const [licenseInfo, setLicenseInfo] = useState({
+    used: 0,
+    max: 0,
+    remaining: 0,
+    overCapacity: 0,
+  });
 
   const [projects, setProjects] = useState([]);
   const [projectsCountAll, setProjectsCountAll] = useState(0);
@@ -123,9 +129,13 @@ export default function HomePage() {
     recent_calls: [],
   });
 
-  const allowedTabs = profile?.role
-    ? ROLE_ACCESS[profile.role] || ["Campaigns", "Dialer", "Follow-Ups"]
-    : [];
+  const allowedTabs = useMemo(
+    () =>
+      profile?.role
+        ? ROLE_ACCESS[profile.role] || ["Campaigns", "Dialer", "Follow-Ups"]
+        : [],
+    [profile?.role]
+  );
 
   const assignedCampaignIdsForAgent = useMemo(() => {
     if (profile?.role !== "agent" || !profile?.id) return null;
@@ -172,7 +182,7 @@ export default function HomePage() {
 
   const scopedCallLogs = useMemo(() => dedupeById(callLogs || []), [callLogs]);
 
-  async function loadCampaignMembers(currentProfile) {
+  const loadCampaignMembers = useCallback(async (currentProfile) => {
     try {
       let query = supabase.from("campaign_members").select("*");
       if (currentProfile?.tenant_id) {
@@ -183,123 +193,32 @@ export default function HomePage() {
         setCampaignMembers(dedupeById(data));
       }
     } catch {
-      // Table may not be created yet before SQL migration runs
+      // Table may not exist yet before SQL migration runs
     }
-  }
+  }, []);
 
-  async function loadCampaignAndLeadsData(token, currentProfile, projectId = "", tenantScope = "") {
-    const params = new URLSearchParams();
-    if (projectId) params.set("project_id", projectId);
-    if (currentProfile.role === "super_admin" && tenantScope) {
-      params.set("tenant_id", tenantScope);
-    }
-    const qs = params.toString() ? `?${params.toString()}` : "";
-
-    const [cfgRes, leadsRes, callsRes, repRes] = await Promise.all([
-      safeJsonFetch(`/api/call-config${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
-      safeJsonFetch(`/api/leads${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
-      safeJsonFetch(`/api/calls${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
-      safeJsonFetch(`/api/reports${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
-    ]);
-
-    if (cfgRes.ok) {
-      setCallFields(dedupeById(cfgRes.data.call_fields || []));
-      setDispositions(dedupeById(cfgRes.data.dispositions || []));
-    }
-    if (leadsRes.ok) setLeads(dedupeById(leadsRes.data.leads || []));
-    if (callsRes.ok) setCallLogs(dedupeById(callsRes.data.calls || []));
-    if (repRes.ok) {
-      setReportData((prev) => ({
-        summary: repRes.data.summary || prev.summary,
-        dispositions: repRes.data.dispositions || {},
-        lead_statuses: repRes.data.lead_statuses || {},
-        recent_calls: dedupeById(repRes.data.recent_calls || []),
-      }));
-    }
-  }
-
-  async function loadRoleData(
-    currentSession,
-    currentProfile,
-    overrideTenantScope = null,
-    forceLandingTab = false
-  ) {
-    if (!currentSession?.access_token || !currentProfile?.role) return;
-    const token = currentSession.access_token;
-    const role = currentProfile.role;
-    const tenantScope = overrideTenantScope !== null ? overrideTenantScope : selectedTenantScope;
-
-    const tabs = ROLE_ACCESS[role] || ["Campaigns", "Dialer", "Follow-Ups"];
-    const landingTab = DEFAULT_LANDING_TAB[role] || tabs[0];
-    setActiveTab((prev) => (!forceLandingTab && prev && tabs.includes(prev) ? prev : landingTab));
-
-    await loadCampaignMembers(currentProfile);
-
-    if (["super_admin", "platform_ops"].includes(role)) {
-      const tRes = await safeJsonFetch("/api/admin/tenants", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (tRes.ok) {
-        const list = dedupeById(tRes.data.tenants || []);
-        setTenants(list);
-        if (role === "super_admin" && !tenantScope && list[0]?.id) {
-          setSelectedTenantScope(list[0].id);
-        }
+  const loadCampaignAndLeadsData = useCallback(
+    async (token, currentProfile, projectId = "", tenantScope = "") => {
+      const params = new URLSearchParams();
+      if (projectId) params.set("project_id", projectId);
+      if (currentProfile.role === "super_admin" && tenantScope) {
+        params.set("tenant_id", tenantScope);
       }
-    }
+      const qs = params.toString() ? `?${params.toString()}` : "";
 
-    if (
-      ["admin", "manager", "tenant_admin", "supervisor", "team_leader"].includes(role) &&
-      currentProfile.tenant_id
-    ) {
-      const uRes = await safeJsonFetch("/api/tenant/users", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (uRes.ok) {
-        const activeSeats = uRes.data.active_seats ?? uRes.data.tenant?.max_licenses ?? 0;
-        const used = uRes.data.used_licenses ?? 0;
-        setTeamUsers(dedupeById(uRes.data.users || []));
-        setTenantLicenseHistory(dedupeById(uRes.data.license_periods || []));
-        setLicenseInfo({
-          used,
-          max: activeSeats,
-          remaining: Math.max(0, activeSeats - used),
-          overCapacity: Math.max(0, used - activeSeats),
-        });
-      }
-    }
+      const [cfgRes, leadsRes, callsRes, repRes] = await Promise.all([
+        safeJsonFetch(`/api/call-config${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
+        safeJsonFetch(`/api/leads${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
+        safeJsonFetch(`/api/calls${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
+        safeJsonFetch(`/api/reports${qs}`, { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
 
-    if (role !== "platform_ops") {
-      const effectiveScope = tenantScope || (role === "super_admin" ? tenants[0]?.id || "" : "");
-      const pUrl =
-        role === "super_admin" && effectiveScope
-          ? `/api/projects?tenant_id=${encodeURIComponent(effectiveScope)}`
-          : "/api/projects";
-      const pRes = await safeJsonFetch(pUrl, { headers: { Authorization: `Bearer ${token}` } });
-      if (pRes.ok) {
-        const allProj = dedupeById(pRes.data.projects || []);
-        setProjectsCountAll(allProj.length);
-        const onlyActive = allProj.filter((p) => {
-          const st = String(p.status || "active").toLowerCase();
-          return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
-        });
-        setProjects(onlyActive);
-        const activeProj =
-          selectedProjectId && onlyActive.some((p) => p.id === selectedProjectId)
-            ? selectedProjectId
-            : onlyActive[0]?.id || "";
-        setSelectedProjectId(activeProj);
-        await loadCampaignAndLeadsData(
-          token,
-          currentProfile,
-          activeProj,
-          role === "super_admin" ? effectiveScope : ""
-        );
+      if (cfgRes.ok) {
+        setCallFields(dedupeById(cfgRes.data.call_fields || []));
+        setDispositions(dedupeById(cfgRes.data.dispositions || []));
       }
-    } else {
-      const repRes = await safeJsonFetch("/api/reports", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      if (leadsRes.ok) setLeads(dedupeById(leadsRes.data.leads || []));
+      if (callsRes.ok) setCallLogs(dedupeById(callsRes.data.calls || []));
       if (repRes.ok) {
         setReportData((prev) => ({
           summary: repRes.data.summary || prev.summary,
@@ -308,55 +227,159 @@ export default function HomePage() {
           recent_calls: dedupeById(repRes.data.recent_calls || []),
         }));
       }
-    }
-  }
+    },
+    []
+  );
 
-  async function hydrateSession(forceLandingTab = false) {
-    setLoading(true);
-    setStatusMessage("");
-    try {
-      const { data } = await supabase.auth.getSession();
-      const currentSession = data?.session || null;
-      if (!currentSession?.user) {
-        setSession(null);
-        setProfile(null);
-        return;
+  const loadRoleData = useCallback(
+    async (currentSession, currentProfile, overrideTenantScope = null, forceLandingTab = false) => {
+      if (!currentSession?.access_token || !currentProfile?.role) return;
+      const token = currentSession.access_token;
+      const role = currentProfile.role;
+
+      let tenantScope =
+        overrideTenantScope !== null ? overrideTenantScope : selectedTenantScope;
+
+      const tabs = ROLE_ACCESS[role] || ["Campaigns", "Dialer", "Follow-Ups"];
+      const landingTab = DEFAULT_LANDING_TAB[role] || tabs[0];
+      setActiveTab((prev) =>
+        !forceLandingTab && prev && tabs.includes(prev) ? prev : landingTab
+      );
+
+      await loadCampaignMembers(currentProfile);
+
+      let loadedTenants = tenants;
+      if (["super_admin", "platform_ops"].includes(role)) {
+        const tRes = await safeJsonFetch("/api/admin/tenants", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (tRes.ok) {
+          loadedTenants = dedupeById(tRes.data.tenants || []);
+          setTenants(loadedTenants);
+          if (role === "super_admin" && !tenantScope && loadedTenants[0]?.id) {
+            tenantScope = loadedTenants[0].id;
+            setSelectedTenantScope(loadedTenants[0].id);
+          }
+        }
       }
 
-      const { data: prof, error } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", currentSession.user.id)
-        .maybeSingle();
-
-      if (error || !prof) {
-        setSession(null);
-        setProfile(null);
-        setStatusMessage(error?.message || "Profile not found.");
-        return;
+      if (
+        ["admin", "manager", "tenant_admin", "supervisor", "team_leader"].includes(role) &&
+        currentProfile.tenant_id
+      ) {
+        const uRes = await safeJsonFetch("/api/tenant/users", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (uRes.ok) {
+          const activeSeats = uRes.data.active_seats ?? uRes.data.tenant?.max_licenses ?? 0;
+          const used = uRes.data.used_licenses ?? 0;
+          setTeamUsers(dedupeById(uRes.data.users || []));
+          setTenantLicenseHistory(dedupeById(uRes.data.license_periods || []));
+          setLicenseInfo({
+            used,
+            max: activeSeats,
+            remaining: Math.max(0, activeSeats - used),
+            overCapacity: Math.max(0, used - activeSeats),
+          });
+        }
       }
 
-      const seatCheck = await safeJsonFetch("/api/auth/check-seat", {
-        headers: { Authorization: `Bearer ${currentSession.access_token}` },
-      });
-
-      if (!seatCheck.ok || seatCheck.data?.allowed === false) {
-        await supabase.auth.signOut();
-        setSession(null);
-        setProfile(null);
-        setAuthError(seatCheck.data?.error || "Login blocked: no active seat license available.");
-        return;
+      if (role !== "platform_ops") {
+        const effectiveScope =
+          tenantScope || (role === "super_admin" ? loadedTenants[0]?.id || "" : "");
+        const pUrl =
+          role === "super_admin" && effectiveScope
+            ? `/api/projects?tenant_id=${encodeURIComponent(effectiveScope)}`
+            : "/api/projects";
+        const pRes = await safeJsonFetch(pUrl, { headers: { Authorization: `Bearer ${token}` } });
+        if (pRes.ok) {
+          const allProj = dedupeById(pRes.data.projects || []);
+          setProjectsCountAll(allProj.length);
+          const onlyActive = allProj.filter((p) => {
+            const st = String(p.status || "active").toLowerCase();
+            return !["inactive", "archived", "closed", "completed", "disabled"].includes(st);
+          });
+          setProjects(onlyActive);
+          const activeProj =
+            selectedProjectId && onlyActive.some((p) => p.id === selectedProjectId)
+              ? selectedProjectId
+              : onlyActive[0]?.id || "";
+          setSelectedProjectId(activeProj);
+          await loadCampaignAndLeadsData(
+            token,
+            currentProfile,
+            activeProj,
+            role === "super_admin" ? effectiveScope : ""
+          );
+        }
+      } else {
+        const repRes = await safeJsonFetch("/api/reports", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (repRes.ok) {
+          setReportData((prev) => ({
+            summary: repRes.data.summary || prev.summary,
+            dispositions: repRes.data.dispositions || {},
+            lead_statuses: repRes.data.lead_statuses || {},
+            recent_calls: dedupeById(repRes.data.recent_calls || []),
+          }));
+        }
       }
+    },
+    [loadCampaignAndLeadsData, loadCampaignMembers, selectedProjectId, selectedTenantScope, tenants]
+  );
 
-      setSession(currentSession);
-      setProfile(prof);
-      await loadRoleData(currentSession, prof, null, forceLandingTab);
-    } catch (err) {
-      setStatusMessage(err?.message || "Failed to load session");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const hydrateSession = useCallback(
+    async (forceLandingTab = false) => {
+      setLoading(true);
+      setStatusMessage("");
+      try {
+        const { data } = await supabase.auth.getSession();
+        const currentSession = data?.session || null;
+        if (!currentSession?.user) {
+          setSession(null);
+          setProfile(null);
+          return;
+        }
+
+        const { data: prof, error } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", currentSession.user.id)
+          .maybeSingle();
+
+        if (error || !prof) {
+          setSession(null);
+          setProfile(null);
+          setStatusMessage(error?.message || "Profile not found.");
+          return;
+        }
+
+        const seatCheck = await safeJsonFetch("/api/auth/check-seat", {
+          headers: { Authorization: `Bearer ${currentSession.access_token}` },
+        });
+
+        if (!seatCheck.ok || seatCheck.data?.allowed === false) {
+          await supabase.auth.signOut();
+          setSession(null);
+          setProfile(null);
+          setAuthError(
+            seatCheck.data?.error || "Login blocked: no active seat license available."
+          );
+          return;
+        }
+
+        setSession(currentSession);
+        setProfile(prof);
+        await loadRoleData(currentSession, prof, null, forceLandingTab);
+      } catch (err) {
+        setStatusMessage(err?.message || "Failed to load session");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loadRoleData]
+  );
 
   useEffect(() => {
     hydrateSession(true);
@@ -369,22 +392,34 @@ export default function HomePage() {
       }
     });
     return () => listener?.subscription?.unsubscribe();
-  }, []);
+  }, [hydrateSession]);
 
   async function handleLogin(e) {
     e.preventDefault();
     setAuthError("");
     setStatusMessage("");
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    if (error) {
-      setAuthError(error.message);
-      return;
+    setSubmittingLogin(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (error) {
+        setAuthError(error.message);
+        return;
+      }
+      await hydrateSession(true);
+    } finally {
+      setSubmittingLogin(false);
     }
-    await hydrateSession(true);
   }
 
   if (loading) {
-    return <div style={{ padding: 24, fontFamily: "sans-serif" }}>Loading workspace...</div>;
+    return (
+      <div style={{ padding: 24, fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        Loading workspace...
+      </div>
+    );
   }
 
   if (!session || !profile) {
@@ -395,11 +430,12 @@ export default function HomePage() {
           margin: "64px auto",
           padding: 24,
           border: "1px solid #cbd5e1",
-          borderRadius: 8,
-          fontFamily: "sans-serif",
+          borderRadius: 10,
+          background: "#ffffff",
+          fontFamily: "system-ui, -apple-system, sans-serif",
         }}
       >
-        <h2 style={{ marginTop: 0 }}>S2C Telecalling CRM</h2>
+        <h2 style={{ marginTop: 0 }}>📞 S2C Telecalling CRM</h2>
         <form onSubmit={handleLogin} style={{ display: "grid", gap: 12 }}>
           <input
             type="email"
@@ -407,6 +443,7 @@ export default function HomePage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
+            style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
           />
           <input
             type="password"
@@ -414,11 +451,28 @@ export default function HomePage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
           />
-          <button type="submit">Sign In</button>
+          <button
+            type="submit"
+            disabled={submittingLogin}
+            style={{
+              padding: "9px 14px",
+              borderRadius: 6,
+              border: "1px solid #1d4ed8",
+              background: "#2563eb",
+              color: "#ffffff",
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            {submittingLogin ? "Signing In..." : "Sign In"}
+          </button>
         </form>
-        {authError && <p style={{ color: "#b91c1c", marginTop: 12 }}>{authError}</p>}
-        {statusMessage && <p style={{ color: "#b91c1c", marginTop: 12 }}>{statusMessage}</p>}
+        {authError && <p style={{ color: "#b91c1c", marginTop: 12, fontSize: 13 }}>{authError}</p>}
+        {statusMessage && (
+          <p style={{ color: "#b91c1c", marginTop: 12, fontSize: 13 }}>{statusMessage}</p>
+        )}
       </div>
     );
   }
@@ -427,7 +481,15 @@ export default function HomePage() {
   const isDialerTab = activeTab === "Dialer";
 
   return (
-    <div style={{ maxWidth: 1220, margin: "24px auto", padding: 16, fontFamily: "sans-serif" }}>
+    <div
+      style={{
+        maxWidth: 1240,
+        margin: "24px auto",
+        padding: 16,
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        color: "#0f172a",
+      }}
+    >
       <PortalHeader
         profile={profile}
         tabs={allowedTabs}
@@ -446,11 +508,13 @@ export default function HomePage() {
       {statusMessage && (
         <div
           style={{
-            padding: 10,
+            padding: "10px 14px",
             marginBottom: 16,
-            borderRadius: 6,
+            borderRadius: 8,
             background: "#f1f5f9",
             border: "1px solid #cbd5e1",
+            fontSize: 13,
+            fontWeight: 600,
           }}
         >
           {statusMessage}
