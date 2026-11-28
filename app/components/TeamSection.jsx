@@ -3,6 +3,14 @@
 import { useState } from "react";
 import { safeJsonFetch } from "@/lib/crmHelpers";
 
+function sanitizeUserIdInput(raw) {
+  return String(raw || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9._-]+/g, "")
+    .slice(0, 20);
+}
+
 function LicensePeriodBadge({ period }) {
   const nowMs = Date.now();
   const startMs = period?.starts_at ? new Date(period.starts_at).getTime() : -Infinity;
@@ -55,16 +63,46 @@ export default function TeamSection({
   const [showAddUserForm, setShowAddUserForm] = useState(false);
   const [resetPasswordUserId, setResetPasswordUserId] = useState(null);
   const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [userIdEdited, setUserIdEdited] = useState(false);
+  const [suggestedUserId, setSuggestedUserId] = useState("");
+  const [formError, setFormError] = useState("");
   const [newUserForm, setNewUserForm] = useState({
+    user_id: "",
     full_name: "",
     email: "",
     password: "",
     role: "agent",
   });
 
+  function handleFullNameChange(value) {
+    const autoId = sanitizeUserIdInput(value);
+    setNewUserForm((prev) => ({
+      ...prev,
+      full_name: value,
+      user_id: userIdEdited ? prev.user_id : autoId,
+    }));
+  }
+
+  function handleUserIdChange(value) {
+    setUserIdEdited(true);
+    setSuggestedUserId("");
+    setFormError("");
+    setNewUserForm((prev) => ({
+      ...prev,
+      user_id: sanitizeUserIdInput(value),
+    }));
+  }
+
   async function handleAddTeamUser(e) {
     e.preventDefault();
     if (!session?.access_token) return;
+    setFormError("");
+    setSuggestedUserId("");
+
+    const payload = {
+      ...newUserForm,
+      user_id: sanitizeUserIdInput(newUserForm.user_id),
+    };
 
     const res = await safeJsonFetch("/api/tenant/users", {
       method: "POST",
@@ -72,17 +110,29 @@ export default function TeamSection({
         "Content-Type": "application/json",
         Authorization: `Bearer ${session.access_token}`,
       },
-      body: JSON.stringify(newUserForm),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
-      onNotify?.(res.data?.error || "Failed to add user.");
+      const msg = res.data?.error || "Failed to add user.";
+      setFormError(msg);
+      if (res.data?.suggestion) {
+        setSuggestedUserId(sanitizeUserIdInput(res.data.suggestion));
+      }
+      onNotify?.(msg);
       return;
     }
 
-    setNewUserForm({ full_name: "", email: "", password: "", role: "agent" });
+    setNewUserForm({ user_id: "", full_name: "", email: "", password: "", role: "agent" });
+    setUserIdEdited(false);
+    setSuggestedUserId("");
+    setFormError("");
     setShowAddUserForm(false);
-    onNotify?.(`Added user "${res.data.user?.full_name || res.data.user?.email}".`);
+    onNotify?.(
+      `Added user "${res.data.user?.full_name || res.data.user?.email}" (User ID: ${
+        res.data.user?.user_id || payload.user_id
+      }).`
+    );
     await onReload?.();
   }
 
@@ -200,7 +250,11 @@ export default function TeamSection({
 
         <button
           type="button"
-          onClick={() => setShowAddUserForm((prev) => !prev)}
+          onClick={() => {
+            setShowAddUserForm((prev) => !prev);
+            setFormError("");
+            setSuggestedUserId("");
+          }}
           style={{
             padding: "8px 14px",
             borderRadius: 8,
@@ -245,15 +299,68 @@ export default function TeamSection({
           <h4 style={{ marginTop: 0 }}>➕ Add Team Member & Set Password</h4>
           <form onSubmit={handleAddTeamUser} style={{ display: "grid", gap: 8, maxWidth: 460 }}>
             <input
-              placeholder="Full Name"
+              placeholder="Full Name *"
               value={newUserForm.full_name}
-              onChange={(e) => setNewUserForm((f) => ({ ...f, full_name: e.target.value }))}
+              onChange={(e) => handleFullNameChange(e.target.value)}
               required
               style={{ padding: "7px 10px", borderRadius: 6, border: "1px solid #cbd5e1" }}
             />
+            <div>
+              <input
+                placeholder="Unique User ID (max 20 chars, e.g. sachin) *"
+                maxLength={20}
+                value={newUserForm.user_id}
+                onChange={(e) => handleUserIdChange(e.target.value)}
+                required
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  border: formError ? "1px solid #dc2626" : "1px solid #cbd5e1",
+                }}
+              />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginTop: 4,
+                  fontSize: 11,
+                  color: "#64748b",
+                }}
+              >
+                <span>Used for API & CSV agent assignment ({newUserForm.user_id.length}/20)</span>
+                {suggestedUserId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUserIdEdited(true);
+                      setNewUserForm((prev) => ({ ...prev, user_id: suggestedUserId }));
+                      setSuggestedUserId("");
+                      setFormError("");
+                    }}
+                    style={{
+                      padding: "2px 8px",
+                      borderRadius: 6,
+                      border: "1px solid #93c5fd",
+                      background: "#eff6ff",
+                      color: "#1d4ed8",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Use suggested: {suggestedUserId}
+                  </button>
+                )}
+              </div>
+              {formError && (
+                <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 4 }}>{formError}</div>
+              )}
+            </div>
             <input
               type="email"
-              placeholder="Work Email"
+              placeholder="Work Email *"
               value={newUserForm.email}
               onChange={(e) => setNewUserForm((f) => ({ ...f, email: e.target.value }))}
               required
@@ -261,7 +368,7 @@ export default function TeamSection({
             />
             <input
               type="password"
-              placeholder="Set Initial Password (min 6 chars)"
+              placeholder="Set Initial Password (min 6 chars) *"
               value={newUserForm.password}
               onChange={(e) => setNewUserForm((f) => ({ ...f, password: e.target.value }))}
               required
@@ -302,6 +409,7 @@ export default function TeamSection({
       >
         <thead>
           <tr style={{ background: "#f1f5f9" }}>
+            <th>User ID</th>
             <th>Name</th>
             <th>Email</th>
             <th>Role</th>
@@ -312,6 +420,9 @@ export default function TeamSection({
         <tbody>
           {(teamUsers || []).map((u) => (
             <tr key={u.id}>
+              <td>
+                <code>{u.user_id || "—"}</code>
+              </td>
               <td><strong>{u.full_name}</strong></td>
               <td>{u.email}</td>
               <td><code>{u.role}</code></td>
