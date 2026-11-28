@@ -8,6 +8,9 @@ import {
 
 const DEFAULT_SUPABASE_URL = "https://yabrgtrerjyzahmswbzw.supabase.co";
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function getSupabaseServer() {
   const url =
     process.env.SUPABASE_URL ||
@@ -31,6 +34,7 @@ const STD_KEYS = new Set([
   "notes",
   "follow_up_at",
   "assigned_to",
+  "user_id",
   "status",
   "disposition",
   "source",
@@ -67,7 +71,9 @@ export async function POST(req) {
     const body = await req.json();
     const projectId = body?.project_id || null;
     const tenantId =
-      profile.role === "super_admin" ? body?.tenant_id || profile.tenant_id || null : profile.tenant_id || null;
+      profile.role === "super_admin"
+        ? body?.tenant_id || profile.tenant_id || null
+        : profile.tenant_id || null;
 
     const incomingRows = Array.isArray(body?.rows)
       ? body.rows
@@ -77,6 +83,55 @@ export async function POST(req) {
 
     if (incomingRows.length === 0) {
       return NextResponse.json({ error: "No rows provided for import." }, { status: 400 });
+    }
+
+    // Load tenant profiles so row.user_id maps to profiles.id (leads.assigned_to)
+    let profileQuery = supabase.from("profiles").select("id, user_id");
+    if (tenantId) {
+      profileQuery = profileQuery.eq("tenant_id", tenantId);
+    }
+    const { data: tenantProfiles = [] } = await profileQuery;
+
+    const profilePkByUserId = {};
+    const validProfilePks = new Set();
+    for (const p of tenantProfiles || []) {
+      if (p?.id) validProfilePks.add(p.id);
+      if (p?.user_id) {
+        profilePkByUserId[String(p.user_id).trim().toLowerCase()] = p.id;
+      }
+    }
+    const availableUserIds = Object.keys(profilePkByUserId);
+
+    function resolveRowAssignee(row) {
+      const rawUserId = row?.user_id;
+      const rawAssignedTo = row?.assigned_to;
+
+      const candidate =
+        rawUserId !== undefined && rawUserId !== null && String(rawUserId).trim() !== ""
+          ? String(rawUserId).trim()
+          : rawAssignedTo !== undefined && rawAssignedTo !== null && String(rawAssignedTo).trim() !== ""
+          ? String(rawAssignedTo).trim()
+          : "";
+
+      if (!candidate) {
+        return { assignedProfileId: null, error: null };
+      }
+
+      const lowerCode = candidate.toLowerCase();
+      if (profilePkByUserId[lowerCode]) {
+        return { assignedProfileId: profilePkByUserId[lowerCode], error: null };
+      }
+
+      if (UUID_REGEX.test(candidate) && validProfilePks.has(candidate)) {
+        return { assignedProfileId: candidate, error: null };
+      }
+
+      return {
+        assignedProfileId: null,
+        error: `Unknown user_id "${candidate}" in this tenant. Available user_ids: ${
+          availableUserIds.length ? availableUserIds.join(", ") : "none"
+        }`,
+      };
     }
 
     let createdFieldsCount = 0;
@@ -100,7 +155,9 @@ export async function POST(req) {
       }
     }
 
-    let existingQuery = supabase.from("leads").select("id, name, phone, email, notes, custom_fields, project_id");
+    let existingQuery = supabase
+      .from("leads")
+      .select("id, name, phone, email, notes, assigned_to, custom_fields, project_id");
     if (projectId) {
       existingQuery = existingQuery.eq("project_id", projectId);
     } else if (tenantId) {
@@ -135,11 +192,28 @@ export async function POST(req) {
         continue;
       }
 
+      const assigneeResult = resolveRowAssignee(row);
+      if (assigneeResult.error) {
+        errors.push({
+          row_number: rowNumber,
+          raw: row.user_id || row.assigned_to || rawPhone,
+          reason: assigneeResult.error,
+        });
+        continue;
+      }
+
       const cleanPhone = phoneCheck.normalized;
-      const cleanName = String(row.name ?? row.customer_name ?? "").trim() || `Lead ${cleanPhone.slice(-4)}`;
+      const cleanName =
+        String(row.name ?? row.customer_name ?? "").trim() || `Lead ${cleanPhone.slice(-4)}`;
       const cleanEmail = String(row.email ?? "").trim() || null;
       const cleanNotes = String(row.notes ?? "").trim() || null;
       const customFields = extractCustomFieldsFromRow(row, STD_KEYS);
+
+      const hasExplicitAssignee =
+        (row.user_id !== undefined && row.user_id !== null && String(row.user_id).trim() !== "") ||
+        (row.assigned_to !== undefined &&
+          row.assigned_to !== null &&
+          String(row.assigned_to).trim() !== "");
 
       const existing = byNormalizedPhone.get(cleanPhone);
       if (existing) {
@@ -155,6 +229,7 @@ export async function POST(req) {
           email: cleanEmail ?? existing.email,
           notes: cleanNotes ?? existing.notes,
           custom_fields: mergedCustom,
+          ...(hasExplicitAssignee ? { assigned_to: assigneeResult.assignedProfileId } : {}),
         };
 
         const { data: updatedLead, error: updErr } = await supabase
@@ -185,7 +260,7 @@ export async function POST(req) {
           custom_fields: customFields,
           ...(projectId ? { project_id: projectId } : {}),
           ...(tenantId ? { tenant_id: tenantId } : {}),
-          ...(row.assigned_to ? { assigned_to: row.assigned_to } : {}),
+          ...(assigneeResult.assignedProfileId ? { assigned_to: assigneeResult.assignedProfileId } : {}),
           ...(row.follow_up_at ? { follow_up_at: row.follow_up_at } : {}),
         };
 
