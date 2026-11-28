@@ -13,6 +13,7 @@ import CampaignsSection from "@/app/components/CampaignsSection";
 import FollowUpsSection from "@/app/components/FollowUpsSection";
 import DialerSection from "@/app/components/DialerSection";
 import ReportsSection from "@/app/components/ReportsSection";
+import TeamLicensesSection from "@/components/TeamLicensesSection";
 
 const ROLE_ACCESS = {
   super_admin: [
