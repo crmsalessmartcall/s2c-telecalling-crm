@@ -7,6 +7,9 @@ import {
 
 const DEFAULT_SUPABASE_URL = "https://yabrgtrerjyzahmswbzw.supabase.co";
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function getSupabaseServer() {
   const url =
     process.env.SUPABASE_URL ||
@@ -30,6 +33,7 @@ const STD_KEYS = new Set([
   "notes",
   "follow_up_at",
   "assigned_to",
+  "user_id",
   "status",
   "disposition",
   "source",
@@ -72,6 +76,49 @@ function resolveTenantScope(profile, requestedTenantId) {
     return requestedTenantId || profile.tenant_id || null;
   }
   return profile.tenant_id || null;
+}
+
+async function resolveAssigneeProfileId(supabase, tenantId, rawValue) {
+  if (rawValue === undefined || rawValue === null) {
+    return { profileId: null, error: null };
+  }
+
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) {
+    return { profileId: null, error: null };
+  }
+
+  let profileQuery = supabase.from("profiles").select("id, user_id");
+  if (tenantId) {
+    profileQuery = profileQuery.eq("tenant_id", tenantId);
+  }
+  const { data: profiles = [] } = await profileQuery;
+
+  const byUserId = {};
+  const validIds = new Set();
+  for (const p of profiles || []) {
+    if (p?.id) validIds.add(p.id);
+    if (p?.user_id) {
+      byUserId[String(p.user_id).trim().toLowerCase()] = p.id;
+    }
+  }
+
+  const codeMatch = byUserId[trimmed.toLowerCase()];
+  if (codeMatch) {
+    return { profileId: codeMatch, error: null };
+  }
+
+  if (UUID_REGEX.test(trimmed) && validIds.has(trimmed)) {
+    return { profileId: trimmed, error: null };
+  }
+
+  const available = Object.keys(byUserId);
+  return {
+    profileId: null,
+    error: `Unknown user_id "${trimmed}" in this tenant. Available user_ids: ${
+      available.length ? available.join(", ") : "none"
+    }`,
+  };
 }
 
 export async function GET(req) {
@@ -134,6 +181,16 @@ export async function POST(req) {
       return NextResponse.json({ error: phoneCheck.reason }, { status: 400 });
     }
 
+    const rawAssigneeInput =
+      body?.user_id !== undefined && body?.user_id !== null && String(body.user_id).trim() !== ""
+        ? body.user_id
+        : body?.assigned_to;
+
+    const assigneeCheck = await resolveAssigneeProfileId(supabase, tenantId, rawAssigneeInput);
+    if (assigneeCheck.error) {
+      return NextResponse.json({ error: assigneeCheck.error }, { status: 400 });
+    }
+
     const cleanPhone = phoneCheck.normalized;
     const cleanName =
       String(body?.name ?? body?.customer_name ?? "").trim() || `Lead ${cleanPhone.slice(-4)}`;
@@ -153,7 +210,7 @@ export async function POST(req) {
       status: body?.status || "new",
       disposition: body?.disposition || null,
       source: body?.source || "manual",
-      assigned_to: body?.assigned_to || null,
+      assigned_to: assigneeCheck.profileId,
       follow_up_at: body?.follow_up_at || null,
       custom_fields: customFields,
       ...(projectId ? { project_id: projectId } : {}),
@@ -204,7 +261,17 @@ export async function PATCH(req) {
     }
 
     const patch = {};
-    if ("assigned_to" in body) patch.assigned_to = body.assigned_to || null;
+    if ("user_id" in body || "assigned_to" in body) {
+      const rawAssigneeInput =
+        body?.user_id !== undefined && body?.user_id !== null && String(body.user_id).trim() !== ""
+          ? body.user_id
+          : body?.assigned_to;
+      const assigneeCheck = await resolveAssigneeProfileId(supabase, tenantId, rawAssigneeInput);
+      if (assigneeCheck.error) {
+        return NextResponse.json({ error: assigneeCheck.error }, { status: 400 });
+      }
+      patch.assigned_to = assigneeCheck.profileId;
+    }
     if ("status" in body) patch.status = body.status;
     if ("disposition" in body) patch.disposition = body.disposition || null;
     if ("follow_up_at" in body) patch.follow_up_at = body.follow_up_at || null;
