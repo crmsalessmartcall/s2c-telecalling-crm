@@ -46,7 +46,6 @@ export async function POST(req, { params }) {
       return NextResponse.json({ error: "At least one lead is required." }, { status: 400 });
     }
 
-    // Load tenant users keyed strictly by their human-readable user_id (e.g. "sachin", "sachin1")
     const { data: tenantProfiles } = await supabase
       .from("profiles")
       .select("id, user_id")
@@ -58,10 +57,13 @@ export async function POST(req, { params }) {
         profilePkByUserId[String(p.user_id).trim().toLowerCase()] = p.id;
       }
     }
+    const availableUserIds = Object.keys(profilePkByUserId);
 
     function resolveUserId(obj) {
       const rawId = obj?.user_id ?? obj?.assigned_to ?? obj?.agent_id;
-      if (!rawId) return { userId: null, profilePk: null };
+      if (rawId === undefined || rawId === null || String(rawId).trim() === "") {
+        return { userId: null, profilePk: null };
+      }
       const cleanId = String(rawId).trim().toLowerCase();
       return {
         userId: cleanId,
@@ -75,7 +77,11 @@ export async function POST(req, { params }) {
 
     if (topLevelAgent.userId && !topLevelAgent.profilePk) {
       return NextResponse.json(
-        { error: `Unknown user_id "${topLevelAgent.userId}" in this tenant.` },
+        {
+          error: `Unknown user_id "${topLevelAgent.userId}" in this tenant. Available user_ids: ${
+            availableUserIds.length ? availableUserIds.join(", ") : "none"
+          }`,
+        },
         { status: 400 }
       );
     }
@@ -96,7 +102,9 @@ export async function POST(req, { params }) {
       if (itemAgent.userId && !itemAgent.profilePk) {
         errors.push({
           index: idx,
-          error: `Unknown user_id "${itemAgent.userId}" in this tenant.`,
+          error: `Unknown user_id "${itemAgent.userId}" in this tenant. Available user_ids: ${
+            availableUserIds.length ? availableUserIds.join(", ") : "none"
+          }`,
         });
         return;
       }
