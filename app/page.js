@@ -8,7 +8,6 @@ import { supabase } from "@/lib/supabaseClient";
 import { safeJsonFetch } from "@/lib/crmHelpers";
 import PortalHeader from "@/app/components/PortalHeader";
 import TenantsSection from "@/app/components/TenantsSection";
-import TeamSection from "@/app/components/TeamSection";
 import CampaignsSection from "@/app/components/CampaignsSection";
 import FollowUpsSection from "@/app/components/FollowUpsSection";
 import DialerSection from "@/app/components/DialerSection";
@@ -577,27 +576,16 @@ export default function HomePage() {
 
       {activeTab === "Team & Licenses" &&
         ["admin", "tenant_admin"].includes(profile.role) && (
-          <div style={{ display: "grid", gap: 16 }}>
-            <TeamLicensesSection
-              session={session}
-              profile={profile}
-              selectedTenantScope={selectedTenantScope}
-              teamUsers={teamUsers}
-              licenseSummary={licenseSummaryForSection}
-              licenseHistory={tenantLicenseHistory}
-              onReload={() => loadRoleData(session, profile)}
-              onNotify={setStatusMessage}
-            />
-            <TeamSection
-              session={session}
-              profile={profile}
-              teamUsers={teamUsers}
-              licenseInfo={licenseInfo}
-              tenantLicenseHistory={tenantLicenseHistory}
-              onReload={() => loadRoleData(session, profile)}
-              onNotify={setStatusMessage}
-            />
-          </div>
+          <TeamLicensesSection
+            session={session}
+            profile={profile}
+            selectedTenantScope={selectedTenantScope}
+            teamUsers={teamUsers}
+            licenseSummary={licenseSummaryForSection}
+            licenseHistory={tenantLicenseHistory}
+            onReload={() => loadRoleData(session, profile)}
+            onNotify={setStatusMessage}
+          />
         )}
 
       {isCampaignTab && (
