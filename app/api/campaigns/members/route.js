@@ -28,6 +28,41 @@ async function authenticateRequest(req, supabase) {
   return { callerProfile };
 }
 
+async function attachUserProfiles(supabase, members = [], tenantId = null) {
+  const list = members || [];
+  if (list.length === 0) return [];
+
+  const userIds = Array.from(new Set(list.map((m) => m.user_id).filter(Boolean)));
+  let profileQuery = supabase
+    .from("profiles")
+    .select("id, user_id, full_name, email, role, is_active");
+
+  if (userIds.length > 0) {
+    profileQuery = profileQuery.in("id", userIds);
+  } else if (tenantId) {
+    profileQuery = profileQuery.eq("tenant_id", tenantId);
+  }
+
+  const { data: profiles } = await profileQuery;
+  const byId = {};
+  for (const p of profiles || []) {
+    byId[p.id] = p;
+  }
+
+  return list.map((m) => {
+    const prof = byId[m.user_id] || {};
+    return {
+      ...m,
+      user_id: prof.user_id || m.user_id || null,
+      profile_id: m.user_id,
+      full_name: prof.full_name || m.full_name || "",
+      email: prof.email || m.email || "",
+      user_role: prof.role || m.member_role || "agent",
+      is_active: prof.is_active ?? true,
+    };
+  });
+}
+
 export async function GET(req) {
   try {
     const supabase = getServiceSupabase();
@@ -65,9 +100,13 @@ export async function GET(req) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
-    return NextResponse.json({ members: members || [] });
+    const enriched = await attachUserProfiles(supabase, members || [], effectiveTenantId);
+    return NextResponse.json({ members: enriched });
   } catch (err) {
-    return NextResponse.json({ error: err?.message || "Failed to load campaign members." }, { status: 500 });
+    return NextResponse.json(
+      { error: err?.message || "Failed to load campaign members." },
+      { status: 500 }
+    );
   }
 }
 
@@ -152,7 +191,8 @@ export async function POST(req) {
       return NextResponse.json({ error: insErr.message }, { status: 400 });
     }
 
-    return NextResponse.json({ ok: true, assigned: true, member: inserted });
+    const [enrichedMember] = await attachUserProfiles(supabase, [inserted], effectiveTenantId);
+    return NextResponse.json({ ok: true, assigned: true, member: enrichedMember });
   } catch (err) {
     return NextResponse.json(
       { error: err?.message || "Failed to update campaign member." },
