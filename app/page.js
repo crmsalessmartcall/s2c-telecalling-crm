@@ -201,6 +201,16 @@ export default function HomePage() {
 
   const scopedCallLogs = useMemo(() => dedupeById(callLogs || []), [callLogs]);
 
+  const licenseSummaryForSection = useMemo(
+    () => ({
+      total_seats: licenseInfo.max,
+      used_seats: licenseInfo.used,
+      available_seats: licenseInfo.remaining,
+      over_capacity: licenseInfo.overCapacity,
+    }),
+    [licenseInfo]
+  );
+
   const loadCampaignMembers = useCallback(async (token, currentProfile, tenantScope = "") => {
     if (!token) return;
     try {
@@ -567,15 +577,27 @@ export default function HomePage() {
 
       {activeTab === "Team & Licenses" &&
         ["admin", "tenant_admin"].includes(profile.role) && (
-          <TeamSection
-            session={session}
-            profile={profile}
-            teamUsers={teamUsers}
-            licenseInfo={licenseInfo}
-            tenantLicenseHistory={tenantLicenseHistory}
-            onReload={() => loadRoleData(session, profile)}
-            onNotify={setStatusMessage}
-          />
+          <div style={{ display: "grid", gap: 16 }}>
+            <TeamLicensesSection
+              session={session}
+              profile={profile}
+              selectedTenantScope={selectedTenantScope}
+              teamUsers={teamUsers}
+              licenseSummary={licenseSummaryForSection}
+              licenseHistory={tenantLicenseHistory}
+              onReload={() => loadRoleData(session, profile)}
+              onNotify={setStatusMessage}
+            />
+            <TeamSection
+              session={session}
+              profile={profile}
+              teamUsers={teamUsers}
+              licenseInfo={licenseInfo}
+              tenantLicenseHistory={tenantLicenseHistory}
+              onReload={() => loadRoleData(session, profile)}
+              onNotify={setStatusMessage}
+            />
+          </div>
         )}
 
       {isCampaignTab && (
@@ -615,6 +637,8 @@ export default function HomePage() {
             setDialLeadRequest(lead);
             setActiveTab("Dialer");
           }}
+          downloadLeadCsvSample={downloadLeadCsvSample}
+          buildIngestCurlSample={buildIngestCurlSample}
         />
       )}
 
@@ -624,6 +648,7 @@ export default function HomePage() {
           profile={profile}
           selectedTenantScope={selectedTenantScope}
           activeProjects={activeProjects}
+          teamUsers={teamUsers}
           leads={scopedLeads}
           dispositions={dispositions}
           onReload={() => loadRoleData(session, profile)}
@@ -642,6 +667,7 @@ export default function HomePage() {
           selectedTenantScope={selectedTenantScope}
           activeProjects={activeProjects}
           selectedProjectId={selectedProjectId}
+          teamUsers={teamUsers}
           leads={scopedLeads}
           callFields={callFields}
           dispositions={dispositions}
