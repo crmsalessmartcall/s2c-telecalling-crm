@@ -1,5 +1,8 @@
 "use client";
-
+import {
+  downloadLeadCsvSample,
+  buildIngestCurlSample,
+} from "@/lib/leadSampleHelpers";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { safeJsonFetch } from "@/lib/crmHelpers";
