@@ -24,6 +24,7 @@ export default function FollowUpsSection({
   profile,
   selectedTenantScope,
   activeProjects,
+  teamUsers = [],
   leads,
   dispositions,
   onReload,
@@ -36,6 +37,14 @@ export default function FollowUpsSection({
   const [search, setSearch] = useState("");
   const [draftTimes, setDraftTimes] = useState({});
   const [savingId, setSavingId] = useState(null);
+
+  const userById = useMemo(() => {
+    const map = {};
+    for (const u of teamUsers || []) {
+      map[u.id] = u;
+    }
+    return map;
+  }, [teamUsers]);
 
   const projectById = useMemo(() => {
     const map = {};
@@ -109,19 +118,24 @@ export default function FollowUpsSection({
 
         if (search.trim()) {
           const q = search.trim().toLowerCase();
+          const assignee = userById[l.assigned_to];
+          const assigneeUid = String(assignee?.user_id || "").toLowerCase();
+          const assigneeName = String(assignee?.full_name || assignee?.email || "").toLowerCase();
           const hit =
             String(l.name || "").toLowerCase().includes(q) ||
             String(l.phone || "").toLowerCase().includes(q) ||
             String(l.email || "").toLowerCase().includes(q) ||
             String(l.disposition || "").toLowerCase().includes(q) ||
-            String(l.notes || "").toLowerCase().includes(q);
+            String(l.notes || "").toLowerCase().includes(q) ||
+            assigneeUid.includes(q) ||
+            assigneeName.includes(q);
           if (!hit) return false;
         }
 
         return true;
       })
       .sort((a, b) => new Date(a.follow_up_at).getTime() - new Date(b.follow_up_at).getTime());
-  }, [baseFollowUps, projectFilter, timingFilter, dispositionFilter, search]);
+  }, [baseFollowUps, projectFilter, timingFilter, dispositionFilter, search, userById]);
 
   async function handleSaveReschedule(lead, overrideIso = null) {
     if (!session?.access_token) return;
@@ -316,10 +330,10 @@ export default function FollowUpsSection({
         </select>
 
         <input
-          placeholder="Search name, phone, email, notes..."
+          placeholder="Search name, phone, user ID, notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 220, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
+          style={{ width: 230, padding: "6px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
         />
 
         {(projectFilter || timingFilter !== "all" || dispositionFilter !== "all" || search) && (
@@ -344,6 +358,7 @@ export default function FollowUpsSection({
             <th>Lead</th>
             <th>Phone</th>
             <th>Campaign</th>
+            <th>Assigned User</th>
             <th>Disposition</th>
             <th>Reschedule Follow-Up</th>
             <th>Actions</th>
@@ -356,6 +371,7 @@ export default function FollowUpsSection({
             const currentInputVal =
               draftTimes[l.id] !== undefined ? draftTimes[l.id] : formatLocalInput(l.follow_up_at);
             const hidePhone = Boolean(projectById[l.project_id]?.hide_phone_numbers);
+            const assignee = userById[l.assigned_to];
 
             return (
               <tr key={l.id} style={{ background: isOverdue ? "#fffafa" : "#ffffff" }}>
@@ -368,6 +384,18 @@ export default function FollowUpsSection({
                   <strong>{hidePhone ? maskPhone(l.phone) : l.phone}</strong>
                 </td>
                 <td>{projectNameById[l.project_id] || "-"}</td>
+                <td>
+                  {assignee ? (
+                    <div>
+                      <div>{assignee.full_name || assignee.email}</div>
+                      {assignee.user_id && (
+                        <code style={{ fontSize: 11 }}>{assignee.user_id}</code>
+                      )}
+                    </div>
+                  ) : (
+                    "Unassigned"
+                  )}
+                </td>
                 <td>
                   <span
                     style={{
@@ -464,7 +492,7 @@ export default function FollowUpsSection({
           })}
           {scheduledFollowUps.length === 0 && (
             <tr>
-              <td colSpan="6">No follow-ups match the selected filters.</td>
+              <td colSpan="7">No follow-ups match the selected filters.</td>
             </tr>
           )}
         </tbody>
