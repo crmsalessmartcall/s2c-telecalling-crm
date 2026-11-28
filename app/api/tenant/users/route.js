@@ -2,6 +2,43 @@ import { NextResponse } from "next/server";
 import { getServiceSupabase, getCallerProfile } from "@/lib/supabaseServer";
 import { computeActiveSeats, getLicensePeriodState } from "@/app/api/admin/tenants/route";
 
+function normalizeUserId(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+function validateUserIdFormat(uid) {
+  if (!uid) return "User ID is required.";
+  if (uid.length > 20) return "User ID must be at most 20 characters.";
+  if (!/^[a-z0-9._-]+$/.test(uid)) {
+    return "User ID can only contain lowercase letters, numbers, dots (.), underscores (_), or hyphens (-).";
+  }
+  return null;
+}
+
+async function suggestNextUserId(supabase, desiredId) {
+  const base = desiredId.replace(/\d+$/, "") || desiredId.slice(0, 17) || "user";
+  const { data: similar } = await supabase
+    .from("profiles")
+    .select("user_id")
+    .ilike("user_id", `${base}%`);
+
+  const taken = new Set(
+    (similar || []).map((r) => String(r.user_id || "").trim().toLowerCase())
+  );
+
+  if (!taken.has(desiredId)) return desiredId;
+
+  for (let i = 1; i <= 9999; i += 1) {
+    const suffix = String(i);
+    const candidate = `${base.slice(0, 20 - suffix.length)}${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${base.slice(0, 15)}${Date.now().toString().slice(-5)}`;
+}
+
 export async function GET(req) {
   try {
     const supabase = getServiceSupabase();
@@ -19,7 +56,7 @@ export async function GET(req) {
         supabase.from("tenants").select("*").eq("id", tenantId).single(),
         supabase
           .from("profiles")
-          .select("id, full_name, email, role, is_active, created_at")
+          .select("id, user_id, full_name, email, role, is_active, created_at")
           .eq("tenant_id", tenantId)
           .order("created_at", { ascending: true }),
         supabase
@@ -78,13 +115,20 @@ export async function POST(req) {
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
     const role = body.role || "agent";
+    const humanUserId = normalizeUserId(body.user_id || body.username);
 
-    if (!fullName || !email || !password) {
+    if (!fullName || !email || !password || !humanUserId) {
       return NextResponse.json(
-        { error: "full_name, email, and password are required" },
+        { error: "user_id, full_name, email, and password are required" },
         { status: 400 }
       );
     }
+
+    const idFormatErr = validateUserIdFormat(humanUserId);
+    if (idFormatErr) {
+      return NextResponse.json({ error: idFormatErr }, { status: 400 });
+    }
+
     if (password.length < 6) {
       return NextResponse.json(
         { error: "Password must be at least 6 characters" },
@@ -93,6 +137,24 @@ export async function POST(req) {
     }
     if (!["supervisor", "team_leader", "agent"].includes(role)) {
       return NextResponse.json({ error: "Invalid user role" }, { status: 400 });
+    }
+
+    // Check uniqueness of user_id and suggest e.g. sachin1 if taken
+    const { data: dupUserId } = await supabase
+      .from("profiles")
+      .select("id")
+      .ilike("user_id", humanUserId)
+      .maybeSingle();
+
+    if (dupUserId) {
+      const suggestion = await suggestNextUserId(supabase, humanUserId);
+      return NextResponse.json(
+        {
+          error: `User ID "${humanUserId}" is already in use. Suggested available User ID: "${suggestion}".`,
+          suggestion,
+        },
+        { status: 409 }
+      );
     }
 
     const tenantId = caller.profile.tenant_id;
@@ -141,6 +203,7 @@ export async function POST(req) {
       .insert({
         id: authUser.user.id,
         tenant_id: tenantId,
+        user_id: humanUserId,
         full_name: fullName,
         email,
         role,
@@ -172,21 +235,60 @@ export async function PATCH(req) {
     }
 
     const body = await req.json();
-    const userId = body.user_id;
-    if (!userId) {
-      return NextResponse.json({ error: "user_id is required" }, { status: 400 });
+    // Primary key UUID of the profile row (supports body.id or legacy body.profile_id)
+    const profileRowId = body.id || body.profile_id || (typeof body.is_active === "boolean" || body.action === "reset_password" ? body.user_id : null);
+    if (!profileRowId) {
+      return NextResponse.json({ error: "Profile id is required" }, { status: 400 });
     }
 
     const tenantId = caller.profile.tenant_id;
     const { data: target } = await supabase
       .from("profiles")
-      .select("id, tenant_id, email, is_active, role")
-      .eq("id", userId)
+      .select("id, tenant_id, user_id, email, is_active, role")
+      .eq("id", profileRowId)
       .eq("tenant_id", tenantId)
       .maybeSingle();
 
     if (!target) {
       return NextResponse.json({ error: "User not found in your tenant" }, { status: 404 });
+    }
+
+    // Update human-readable user_id when body.id (or body.profile_id) and body.user_id are provided
+    if ((body.id || body.profile_id) && typeof body.user_id === "string") {
+      const nextUserId = normalizeUserId(body.user_id);
+      const formatErr = validateUserIdFormat(nextUserId);
+      if (formatErr) {
+        return NextResponse.json({ error: formatErr }, { status: 400 });
+      }
+
+      const { data: conflict } = await supabase
+        .from("profiles")
+        .select("id")
+        .ilike("user_id", nextUserId)
+        .neq("id", profileRowId)
+        .maybeSingle();
+
+      if (conflict) {
+        const suggestion = await suggestNextUserId(supabase, nextUserId);
+        return NextResponse.json(
+          {
+            error: `User ID "${nextUserId}" is already in use. Suggested available User ID: "${suggestion}".`,
+            suggestion,
+          },
+          { status: 409 }
+        );
+      }
+
+      const { data: updatedUser, error: idErr } = await supabase
+        .from("profiles")
+        .update({ user_id: nextUserId })
+        .eq("id", profileRowId)
+        .eq("tenant_id", tenantId)
+        .select()
+        .single();
+
+      if (idErr) return NextResponse.json({ error: idErr.message }, { status: 400 });
+      return NextResponse.json({ user: updatedUser });
     }
 
     if (body.action === "reset_password" || typeof body.password === "string") {
@@ -198,7 +300,7 @@ export async function PATCH(req) {
         );
       }
 
-      const { error: pwErr } = await supabase.auth.admin.updateUserById(userId, {
+      const { error: pwErr } = await supabase.auth.admin.updateUserById(profileRowId, {
         password: nextPassword,
       });
 
@@ -206,12 +308,12 @@ export async function PATCH(req) {
         return NextResponse.json({ error: pwErr.message }, { status: 400 });
       }
 
-      return NextResponse.json({ ok: true, password_reset: true, user_id: userId });
+      return NextResponse.json({ ok: true, password_reset: true, id: profileRowId });
     }
 
     if (typeof body.is_active !== "boolean") {
       return NextResponse.json(
-        { error: "Provide boolean is_active or a new password" },
+        { error: "Provide boolean is_active, user_id, or a new password" },
         { status: 400 }
       );
     }
@@ -237,7 +339,7 @@ export async function PATCH(req) {
     const { data: updated, error: updErr } = await supabase
       .from("profiles")
       .update({ is_active: body.is_active })
-      .eq("id", userId)
+      .eq("id", profileRowId)
       .eq("tenant_id", tenantId)
       .select()
       .single();
@@ -262,11 +364,16 @@ export async function DELETE(req) {
     }
 
     const body = await req.json().catch(() => ({}));
-    const userId = body.user_id || new URL(req.url).searchParams.get("user_id");
-    if (!userId) {
-      return NextResponse.json({ error: "user_id is required" }, { status: 400 });
+    const profileRowId =
+      body.id ||
+      body.user_id ||
+      new URL(req.url).searchParams.get("id") ||
+      new URL(req.url).searchParams.get("user_id");
+
+    if (!profileRowId) {
+      return NextResponse.json({ error: "User id is required" }, { status: 400 });
     }
-    if (userId === caller.profile.id) {
+    if (profileRowId === caller.profile.id) {
       return NextResponse.json({ error: "You cannot delete your own admin account" }, { status: 400 });
     }
 
@@ -274,7 +381,7 @@ export async function DELETE(req) {
     const { data: target } = await supabase
       .from("profiles")
       .select("id, tenant_id")
-      .eq("id", userId)
+      .eq("id", profileRowId)
       .eq("tenant_id", tenantId)
       .maybeSingle();
 
@@ -282,10 +389,10 @@ export async function DELETE(req) {
       return NextResponse.json({ error: "User not found in your tenant" }, { status: 404 });
     }
 
-    await supabase.from("profiles").delete().eq("id", userId).eq("tenant_id", tenantId);
-    await supabase.auth.admin.deleteUser(userId).catch(() => {});
+    await supabase.from("profiles").delete().eq("id", profileRowId).eq("tenant_id", tenantId);
+    await supabase.auth.admin.deleteUser(profileRowId).catch(() => {});
 
-    return NextResponse.json({ ok: true, deleted_user_id: userId });
+    return NextResponse.json({ ok: true, deleted_id: profileRowId });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
