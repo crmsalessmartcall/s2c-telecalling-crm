@@ -1,115 +1,157 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import {
-  extractCustomFieldsFromRow,
-  normalizeAndValidatePhone,
-} from "@/lib/ingestHelpers";
+import { getServiceSupabase } from "@/lib/supabaseServer";
 
-const DEFAULT_SUPABASE_URL = "https://yabrgtrerjyzahmswbzw.supabase.co";
+export const dynamic = "force-dynamic";
 
-function getSupabaseServer() {
-  const url =
-    process.env.SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    DEFAULT_SUPABASE_URL;
-  const key =
-    process.env.SUPABASE_SECRET_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-const STD_KEYS = new Set([
-  "name",
-  "customer_name",
-  "phone",
-  "customer_number",
-  "email",
-  "notes",
-  "custom_fields",
-]);
-
-export async function POST(req, context) {
+export async function POST(req, { params }) {
   try {
-    const supabase = getSupabaseServer();
+    const supabase = getServiceSupabase();
     if (!supabase) {
+      return NextResponse.json({ error: "Supabase server client not configured." }, { status: 500 });
+    }
+
+    const resolvedParams = await params;
+    const campaignId =
+      resolvedParams?.campaignId || resolvedParams?.id || resolvedParams?.projectId;
+
+    if (!campaignId) {
+      return NextResponse.json({ error: "Campaign ID is required in URL." }, { status: 400 });
+    }
+
+    const { data: project, error: projErr } = await supabase
+      .from("projects")
+      .select("id, tenant_id, status")
+      .eq("id", campaignId)
+      .maybeSingle();
+
+    if (projErr) {
+      return NextResponse.json({ error: projErr.message }, { status: 400 });
+    }
+    if (!project) {
+      return NextResponse.json({ error: "Campaign not found." }, { status: 404 });
+    }
+
+    const body = await req.json().catch(() => null);
+    if (!body) {
+      return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+    }
+
+    const rawItems = Array.isArray(body)
+      ? body
+      : Array.isArray(body.leads)
+        ? body.leads
+        : [body];
+
+    if (rawItems.length === 0) {
+      return NextResponse.json({ error: "At least one lead is required." }, { status: 400 });
+    }
+
+    // Load tenant users keyed strictly by their human-readable user_id (e.g. "sachin", "sachin1")
+    const { data: tenantProfiles } = await supabase
+      .from("profiles")
+      .select("id, user_id")
+      .eq("tenant_id", project.tenant_id);
+
+    const profilePkByUserId = {};
+    for (const p of tenantProfiles || []) {
+      if (p.user_id) {
+        profilePkByUserId[String(p.user_id).trim().toLowerCase()] = p.id;
+      }
+    }
+
+    function resolveUserId(obj) {
+      const rawId = obj?.user_id ?? obj?.assigned_to ?? obj?.agent_id;
+      if (!rawId) return { userId: null, profilePk: null };
+      const cleanId = String(rawId).trim().toLowerCase();
+      return {
+        userId: cleanId,
+        profilePk: profilePkByUserId[cleanId] || null,
+      };
+    }
+
+    const topLevelAgent = !Array.isArray(body)
+      ? resolveUserId(body)
+      : { userId: null, profilePk: null };
+
+    if (topLevelAgent.userId && !topLevelAgent.profilePk) {
       return NextResponse.json(
-        { error: "Supabase server client not configured." },
-        { status: 500 }
+        { error: `Unknown user_id "${topLevelAgent.userId}" in this tenant.` },
+        { status: 400 }
       );
     }
 
-    const params = await context.params;
-    const campaignId = String(params?.id || "").trim();
-    if (!campaignId) {
-      return NextResponse.json({ error: "Campaign ID is required." }, { status: 400 });
-    }
+    const rowsToInsert = [];
+    const errors = [];
 
-    let tenantId = null;
-    try {
-      const { data: campaign } = await supabase
-        .from("projects")
-        .select("id, tenant_id, ingest_token")
-        .eq("id", campaignId)
-        .maybeSingle();
+    rawItems.forEach((item, idx) => {
+      const name = String(item?.name || "").trim();
+      const phone = String(item?.phone || "").trim();
 
-      if (campaign) {
-        tenantId = campaign.tenant_id || null;
-        const urlToken = new URL(req.url).searchParams.get("token") || "";
-        const headerToken =
-          req.headers.get("x-ingest-token") ||
-          (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-        const providedToken = headerToken || urlToken;
-
-        if (campaign.ingest_token && providedToken !== campaign.ingest_token) {
-          return NextResponse.json({ error: "Invalid campaign API token." }, { status: 401 });
-        }
+      if (!name || !phone) {
+        errors.push({ index: idx, error: "Both name and phone are required." });
+        return;
       }
-    } catch {
-      // Proceed with campaignId as project_id if optional columns/tables aren't present
-    }
 
-    const body = await req.json();
-    const rawPhone = body?.phone ?? body?.customer_number ?? body?.mobile ?? "";
-    const phoneCheck = normalizeAndValidatePhone(rawPhone);
-    if (!phoneCheck.valid) {
-      return NextResponse.json({ error: phoneCheck.reason }, { status: 400 });
-    }
+      const itemAgent = resolveUserId(item);
+      if (itemAgent.userId && !itemAgent.profilePk) {
+        errors.push({
+          index: idx,
+          error: `Unknown user_id "${itemAgent.userId}" in this tenant.`,
+        });
+        return;
+      }
 
-    const name =
-      String(body?.name ?? body?.customer_name ?? "").trim() ||
-      `API Lead ${phoneCheck.normalized.slice(-4)}`;
-    const email = String(body?.email ?? "").trim() || null;
-    const notes = String(body?.notes ?? "").trim() || "Ingested via Campaign API";
-    const customFields = extractCustomFieldsFromRow(body, STD_KEYS);
+      const assignedProfilePk = itemAgent.profilePk || topLevelAgent.profilePk || null;
 
-    const { data: lead, error: insErr } = await supabase
-      .from("leads")
-      .insert({
+      const customFields =
+        item?.custom_fields && typeof item.custom_fields === "object"
+          ? { ...item.custom_fields }
+          : {};
+
+      if (item?.serial_number !== undefined && item?.serial_number !== null) {
+        customFields.serial_number = String(item.serial_number).trim();
+      }
+
+      rowsToInsert.push({
+        tenant_id: project.tenant_id,
+        project_id: project.id,
         name,
-        phone: phoneCheck.normalized,
-        email,
-        notes,
-        status: "new",
-        source: "api",
+        phone,
+        email: item?.email ? String(item.email).trim() : null,
+        status: item?.status ? String(item.status).trim() : "new",
+        notes: item?.notes ? String(item.notes).trim() : null,
+        assigned_to: assignedProfilePk,
         custom_fields: customFields,
-        project_id: campaignId,
-        ...(tenantId ? { tenant_id: tenantId } : {}),
-      })
-      .select("*")
-      .single();
+      });
+    });
+
+    if (rowsToInsert.length === 0) {
+      return NextResponse.json(
+        { error: "No valid leads found in payload.", details: errors },
+        { status: 400 }
+      );
+    }
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("leads")
+      .insert(rowsToInsert)
+      .select("*");
 
     if (insErr) {
       return NextResponse.json({ error: insErr.message }, { status: 400 });
     }
 
-    return NextResponse.json({ ok: true, source: "api", lead }, { status: 201 });
-  } catch (err) {
     return NextResponse.json(
-      { error: err?.message || "API lead ingestion failed." },
-      { status: 500 }
+      {
+        ok: true,
+        inserted_count: (inserted || []).length,
+        skipped_count: errors.length,
+        errors: errors.length > 0 ? errors : undefined,
+        leads: inserted || [],
+      },
+      { status: 201 }
     );
+  } catch (err) {
+    return NextResponse.json({ error: err?.message || "Failed to ingest leads." }, { status: 500 });
   }
 }
