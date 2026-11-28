@@ -29,6 +29,7 @@ export default function CampaignMembersTab({
     if (!q) return list;
     return list.filter(
       (u) =>
+        String(u.user_id || "").toLowerCase().includes(q) ||
         String(u.full_name || "").toLowerCase().includes(q) ||
         String(u.email || "").toLowerCase().includes(q) ||
         String(u.role || "").toLowerCase().includes(q)
@@ -92,8 +93,8 @@ export default function CampaignMembersTab({
       onLocalMemberChange?.(user.id, nextAssigned);
       onNotify?.(
         nextAssigned
-          ? `Added ${user.full_name || user.email} to "${campaign.name}".`
-          : `Removed ${user.full_name || user.email} from "${campaign.name}".`
+          ? `Added ${user.full_name || user.email} (${user.user_id || "—"}) to "${campaign.name}".`
+          : `Removed ${user.full_name || user.email} (${user.user_id || "—"}) from "${campaign.name}".`
       );
       await onReloadAll?.();
     } finally {
@@ -101,7 +102,6 @@ export default function CampaignMembersTab({
     }
   }
 
-  // Equal distribution of pending leads across selected campaign members (e.g., 10 leads / 2 users = 5 each)
   async function handleDistributePendingLeads() {
     const memberIds = Array.from(assignedMemberIds);
     if (memberIds.length === 0) {
@@ -140,7 +140,8 @@ export default function CampaignMembersTab({
       const breakdown = memberIds
         .map((id) => {
           const u = (teamUsers || []).find((x) => x.id === id);
-          return `${u?.full_name || u?.email || id}: ${perMemberCounts.get(id) || 0}`;
+          const label = u?.user_id ? `${u.full_name || u.email} (${u.user_id})` : u?.full_name || u?.email || id;
+          return `${label}: ${perMemberCounts.get(id) || 0}`;
         })
         .join(", ");
 
@@ -178,21 +179,21 @@ export default function CampaignMembersTab({
             {campaign.name})
           </h4>
           <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
-            Pending leads in campaign: <strong>{pendingCallLeads.length}</strong>. Transfer assigned
-            leads before removing a member.
+            Pending leads in campaign: <strong>{pendingCallLeads.length}</strong>. Use each
+            member&apos;s <strong>User ID</strong> in CSV/API <code>user_id</code> assignment.
           </div>
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
-            placeholder="Search user by name, email, role..."
+            placeholder="Search by user ID, name, email, role..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             style={{
               padding: "6px 10px",
               borderRadius: 6,
               border: "1px solid #cbd5e1",
-              minWidth: 220,
+              minWidth: 240,
             }}
           />
           {canManageCampaign && (
@@ -221,6 +222,7 @@ export default function CampaignMembersTab({
       <table border="1" cellPadding="8" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
           <tr style={{ background: "#f8fafc" }}>
+            <th>User ID</th>
             <th>User</th>
             <th>Email</th>
             <th>Role</th>
@@ -237,6 +239,9 @@ export default function CampaignMembersTab({
 
             return (
               <tr key={u.id} style={{ background: isAssigned ? "#f0fdf4" : "#ffffff" }}>
+                <td>
+                  <code>{u.user_id || "—"}</code>
+                </td>
                 <td><strong>{u.full_name || u.email}</strong></td>
                 <td>{u.email}</td>
                 <td><code>{u.role}</code></td>
@@ -256,7 +261,7 @@ export default function CampaignMembersTab({
                       <option value="">-- Transfer to user --</option>
                       {otherMembers.map((om) => (
                         <option key={om.id} value={om.id}>
-                          {om.full_name || om.email}
+                          {om.full_name || om.email} ({om.user_id || "—"})
                         </option>
                       ))}
                     </select>
@@ -291,7 +296,7 @@ export default function CampaignMembersTab({
           })}
           {filteredUsers.length === 0 && (
             <tr>
-              <td colSpan="6">No users match your search.</td>
+              <td colSpan="7">No users match your search.</td>
             </tr>
           )}
         </tbody>
