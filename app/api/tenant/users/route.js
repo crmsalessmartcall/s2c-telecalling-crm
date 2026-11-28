@@ -139,7 +139,6 @@ export async function POST(req) {
       return NextResponse.json({ error: "Invalid user role" }, { status: 400 });
     }
 
-    // Check uniqueness of user_id and suggest e.g. sachin1 if taken
     const { data: dupUserId } = await supabase
       .from("profiles")
       .select("id")
@@ -235,8 +234,13 @@ export async function PATCH(req) {
     }
 
     const body = await req.json();
-    // Primary key UUID of the profile row (supports body.id or legacy body.profile_id)
-    const profileRowId = body.id || body.profile_id || (typeof body.is_active === "boolean" || body.action === "reset_password" ? body.user_id : null);
+    const profileRowId =
+      body.id ||
+      body.profile_id ||
+      (typeof body.is_active === "boolean" || body.action === "reset_password"
+        ? body.user_id
+        : null);
+
     if (!profileRowId) {
       return NextResponse.json({ error: "Profile id is required" }, { status: 400 });
     }
@@ -253,7 +257,6 @@ export async function PATCH(req) {
       return NextResponse.json({ error: "User not found in your tenant" }, { status: 404 });
     }
 
-    // Update human-readable user_id when body.id (or body.profile_id) and body.user_id are provided
     if ((body.id || body.profile_id) && typeof body.user_id === "string") {
       const nextUserId = normalizeUserId(body.user_id);
       const formatErr = validateUserIdFormat(nextUserId);
