@@ -1,7 +1,18 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 import { safeJsonFetch } from "@/lib/crmHelpers";
+
+const DEFAULT_SUPABASE_URL = "https://yabrgtrerjyzahmswbzw.supabase.co";
+
+function getBrowserSupabase() {
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL || DEFAULT_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key);
+}
 
 export default function TeamLicensesSection({
   session,
@@ -76,35 +87,53 @@ export default function TeamLicensesSection({
     setEditingUserId(null);
   }
 
+  async function patchUserFallback(user, fieldsToUpdate) {
+    if (session?.access_token) {
+      const res = await safeJsonFetch("/api/users", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          user_id_pk: user.id,
+          ...fieldsToUpdate,
+          ...(profile?.role === "super_admin" && selectedTenantScope
+            ? { tenant_id: selectedTenantScope }
+            : {}),
+        }),
+      });
+      if (res.ok) return { ok: true };
+      if (res.status !== 404 && res.status !== 405) {
+        return { ok: false, error: res.data?.error || "Failed to update user." };
+      }
+    }
+
+    const sb = getBrowserSupabase();
+    if (!sb) return { ok: false, error: "Supabase client not configured." };
+    const { error } = await sb.from("profiles").update(fieldsToUpdate).eq("id", user.id);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  }
+
   async function handleSaveEdit(e, user) {
     e.preventDefault();
     if (!user?.id) return;
     setSavingEdit(true);
     try {
       const payload = {
-        user_id_pk: user.id,
         full_name: editForm.full_name.trim(),
         user_id: editForm.user_id.trim(),
         email: editForm.email.trim(),
         role: editForm.role,
-        ...(profile?.role === "super_admin" && selectedTenantScope
-          ? { tenant_id: selectedTenantScope }
-          : {}),
       };
 
       if (onUpdateUser) {
-        await onUpdateUser(user, payload);
-      } else if (session?.access_token) {
-        const res = await safeJsonFetch("/api/users", {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          onNotify?.(res.data?.error || "Failed to update user details.");
+        await onUpdateUser(user, { user_id_pk: user.id, ...payload });
+      } else {
+        const result = await patchUserFallback(user, payload);
+        if (!result.ok) {
+          onNotify?.(result.error || "Failed to update user details.");
           return;
         }
       }
@@ -124,23 +153,10 @@ export default function TeamLicensesSection({
     try {
       if (onToggleUserActive) {
         await onToggleUserActive(user, nextActive);
-      } else if (session?.access_token) {
-        const res = await safeJsonFetch("/api/users", {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({
-            user_id_pk: user.id,
-            is_active: nextActive,
-            ...(profile?.role === "super_admin" && selectedTenantScope
-              ? { tenant_id: selectedTenantScope }
-              : {}),
-          }),
-        });
-        if (!res.ok) {
-          onNotify?.(res.data?.error || "Failed to update user status.");
+      } else {
+        const result = await patchUserFallback(user, { is_active: nextActive });
+        if (!result.ok) {
+          onNotify?.(result.error || "Failed to update user status.");
           return;
         }
       }
@@ -181,6 +197,15 @@ export default function TeamLicensesSection({
           onNotify?.(res.data?.error || "Failed to send password reset.");
           return;
         }
+      } else {
+        const sb = getBrowserSupabase();
+        if (sb && user.email) {
+          const { error } = await sb.auth.resetPasswordForEmail(user.email);
+          if (error) {
+            onNotify?.(error.message);
+            return;
+          }
+        }
       }
       onNotify?.(`Password reset triggered for ${user.email || user.full_name}.`);
     } finally {
@@ -204,7 +229,7 @@ export default function TeamLicensesSection({
           },
           body: JSON.stringify({ user_id_pk: user.id }),
         });
-        if (!res.ok) {
+        if (!res.ok && res.status !== 404 && res.status !== 405) {
           onNotify?.(res.data?.error || "Failed to delete user.");
           return;
         }
