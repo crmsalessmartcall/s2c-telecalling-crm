@@ -891,4 +891,128 @@ export default function DialerSection({
           }}
         >
           <h4 style={{ margin: 0 }}>
-            🕘 Call Logs ({(callLogs || []).length} total
+            🕘 Call Logs ({(callLogs || []).length} total — Page {callLogPage} of {totalPages}, 10 per page)
+          </h4>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button
+              type="button"
+              disabled={callLogPage <= 1}
+              onClick={() => setCallLogPage((p) => Math.max(1, p - 1))}
+            >
+              Prev 10
+            </button>
+            <span style={{ fontSize: 12 }}>
+              {callLogPage} / {totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={callLogPage >= totalPages}
+              onClick={() => setCallLogPage((p) => Math.min(totalPages, p + 1))}
+            >
+              Next 10
+            </button>
+          </div>
+        </div>
+
+        <table border="1" cellPadding="7" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th>Details</th>
+              <th>Time</th>
+              <th>Phone</th>
+              <th>Status</th>
+              <th>Disposition</th>
+              <th>Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageCalls.map((c) => {
+              const open = Boolean(expandedCallIds[c.id]);
+              const cfEntries =
+                c.custom_fields && typeof c.custom_fields === "object"
+                  ? Object.entries(c.custom_fields)
+                  : [];
+              const rowHidePhone = Boolean(projectById[c.project_id]?.hide_phone_numbers);
+              const matchedLead = c.lead_id ? (leads || []).find((l) => l.id === c.lead_id) : null;
+              const logAssignee = matchedLead?.assigned_to ? userById[matchedLead.assigned_to] : null;
+              return (
+                <Fragment key={c.id}>
+                  <tr>
+                    <td>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedCallIds((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
+                      >
+                        {open ? "Collapse" : "Expand"}
+                      </button>
+                    </td>
+                    <td>{c.created_at ? new Date(c.created_at).toLocaleString() : "-"}</td>
+                    <td>{rowHidePhone ? maskPhone(c.phone) : c.phone}</td>
+                    <td>{c.status}</td>
+                    <td>{c.disposition || "-"}</td>
+                    <td>{c.duration_seconds || 0}s</td>
+                  </tr>
+                  {open && (
+                    <tr>
+                      <td colSpan="6" style={{ background: "#f8fafc" }}>
+                        <div style={{ marginBottom: 6 }}>
+                          <strong>Provider:</strong> {c.provider || "smartcall"} |{" "}
+                          {!isAgent && (
+                            <>
+                              <strong>User ID:</strong> <code>{logAssignee?.user_id || "—"}</code> |{" "}
+                            </>
+                          )}
+                          <strong>Notes:</strong> {c.notes || "-"}
+                        </div>
+                        <div style={{ marginBottom: 8 }}>
+                          <strong>Parameters:</strong>{" "}
+                          {cfEntries.length > 0
+                            ? cfEntries.map(([k, v]) => `${k}: ${String(v)}`).join(" | ")
+                            : "None"}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setQueueActive(false);
+                              setForm((prev) => ({
+                                ...prev,
+                                lead_id: c.lead_id || "",
+                                phone: c.phone || "",
+                                status: "connected",
+                                disposition: c.disposition || "",
+                                notes: c.notes || "",
+                                custom_fields:
+                                  c.custom_fields && typeof c.custom_fields === "object"
+                                    ? { ...c.custom_fields }
+                                    : {},
+                                callStartedAt: new Date().toISOString(),
+                              }));
+                              onNotify(`Calling back ${rowHidePhone ? maskPhone(c.phone) : c.phone}.`);
+                            }}
+                          >
+                            Call Back
+                          </button>
+                          {c.lead_id && (
+                            <button type="button" onClick={() => handleQuickFollowUp(c.lead_id)}>
+                              Schedule +24h Follow-Up
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+            {pageCalls.length === 0 && (
+              <tr>
+                <td colSpan="6">No call logs found.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
