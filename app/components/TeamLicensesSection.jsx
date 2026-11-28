@@ -1,18 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabaseClient";
 import { safeJsonFetch } from "@/lib/crmHelpers";
-
-const DEFAULT_SUPABASE_URL = "https://yabrgtrerjyzahmswbzw.supabase.co";
-
-function getBrowserSupabase() {
-  const url =
-    process.env.NEXT_PUBLIC_SUPABASE_URL || DEFAULT_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
-  return createClient(url, key);
-}
 
 export default function TeamLicensesSection({
   session,
@@ -109,9 +99,15 @@ export default function TeamLicensesSection({
       }
     }
 
-    const sb = getBrowserSupabase();
-    if (!sb) return { ok: false, error: "Supabase client not configured." };
-    const { error } = await sb.from("profiles").update(fieldsToUpdate).eq("id", user.id);
+    if (!supabase) {
+      return { ok: false, error: "Supabase client not initialized." };
+    }
+
+    const { error } = await supabase
+      .from("profiles")
+      .update(fieldsToUpdate)
+      .eq("id", user.id);
+
     if (error) return { ok: false, error: error.message };
     return { ok: true };
   }
@@ -194,20 +190,29 @@ export default function TeamLicensesSection({
           }),
         });
         if (!res.ok) {
-          onNotify?.(res.data?.error || "Failed to send password reset.");
-          return;
-        }
-      } else {
-        const sb = getBrowserSupabase();
-        if (sb && user.email) {
-          const { error } = await sb.auth.resetPasswordForEmail(user.email);
-          if (error) {
-            onNotify?.(error.message);
+          if (res.status === 404 || res.status === 405) {
+            if (!user.email) {
+              onNotify?.("User has no email address for password reset.");
+              return;
+            }
+            const { error } = await supabase.auth.resetPasswordForEmail(user.email);
+            if (error) {
+              onNotify?.(error.message);
+              return;
+            }
+          } else {
+            onNotify?.(res.data?.error || "Failed to send password reset.");
             return;
           }
         }
+      } else if (user.email) {
+        const { error } = await supabase.auth.resetPasswordForEmail(user.email);
+        if (error) {
+          onNotify?.(error.message);
+          return;
+        }
       }
-      onNotify?.(`Password reset triggered for ${user.email || user.full_name}.`);
+      onNotify?.(`Password reset sent for ${user.email || user.full_name}.`);
     } finally {
       setBusyUserKey(null);
     }
@@ -317,7 +322,7 @@ export default function TeamLicensesSection({
         </button>
       </div>
 
-      {/* Collapsible Tenant License History */}
+      {/* Collapsible Tenant License History (Shown only when clicked) */}
       {showLicenseHistory && (
         <div
           style={{
