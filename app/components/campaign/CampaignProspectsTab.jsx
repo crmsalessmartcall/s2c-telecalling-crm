@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { downloadSampleCsv, parseCsvRows, safeJsonFetch } from "@/lib/crmHelpers";
+import { parseCsvRows, safeJsonFetch } from "@/lib/crmHelpers";
+import {
+  buildLeadCsvSample,
+  getTenantSampleUserIds,
+} from "@/lib/leadSampleHelpers";
 
 function toKey(raw) {
   return String(raw || "")
@@ -25,6 +29,32 @@ function escapeCsvCell(val) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
+}
+
+function buildDefaultTwoLeadPayload(teamUsers = []) {
+  const { firstUserId, secondUserId } = getTenantSampleUserIds(teamUsers);
+  return JSON.stringify(
+    {
+      leads: [
+        {
+          name: "Rahul Sharma",
+          phone: "9876543210",
+          email: "rahul@example.com",
+          serial_number: "SN-1001",
+          user_id: firstUserId,
+        },
+        {
+          name: "Priya Nair",
+          phone: "9876543211",
+          email: "priya@example.com",
+          serial_number: "SN-1002",
+          user_id: secondUserId,
+        },
+      ],
+    },
+    null,
+    2
+  );
 }
 
 export default function CampaignProspectsTab({
@@ -65,11 +95,15 @@ export default function CampaignProspectsTab({
   const [columnMapping, setColumnMapping] = useState({});
   const [importingRows, setImportingRows] = useState(false);
 
-  const [apiTestPayload, setApiTestPayload] = useState(
-    '{\n  "name": "Rahul Sharma",\n  "phone": "9876543210",\n  "email": "rahul@example.com",\n  "serial_number": "SN-1001"\n}'
-  );
+  const [apiTestPayload, setApiTestPayload] = useState(() => buildDefaultTwoLeadPayload(teamUsers));
+  const [apiPayloadCustomized, setApiPayloadCustomized] = useState(false);
 
-  // Draft filter inputs vs. Applied filter state (Apply button commits filters)
+  useEffect(() => {
+    if (!apiPayloadCustomized) {
+      setApiTestPayload(buildDefaultTwoLeadPayload(teamUsers));
+    }
+  }, [teamUsers, campaign?.id, apiPayloadCustomized]);
+
   const [draftFilters, setDraftFilters] = useState({
     status: "all",
     disposition: "all",
@@ -83,7 +117,6 @@ export default function CampaignProspectsTab({
     search: "",
   });
 
-  // Bulk action state (Assign or Delete — applied via Apply button)
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [bulkActionType, setBulkActionType] = useState("assign"); // "assign" | "delete"
   const [targetAssigneeId, setTargetAssigneeId] = useState("");
@@ -94,15 +127,23 @@ export default function CampaignProspectsTab({
     setSelectedLeadIds([]);
   }, [campaign?.id, appliedFilters, browseMode, pageSize, prospectMode]);
 
-  const userNameMap = useMemo(() => {
+  const userById = useMemo(() => {
     const map = {};
     for (const u of teamUsers || []) {
-      map[u.id] = u.full_name || u.email || u.id;
+      map[u.id] = u;
     }
     return map;
   }, [teamUsers]);
 
-  // Only custom fields where Display is enabled appear on the prospect browse view
+  const userNameMap = useMemo(() => {
+    const map = {};
+    for (const u of teamUsers || []) {
+      const base = u.full_name || u.email || u.id;
+      map[u.id] = u.user_id ? `${base} (${u.user_id})` : base;
+    }
+    return map;
+  }, [teamUsers]);
+
   const displayedCustomFields = useMemo(
     () => (callFields || []).filter((cf) => cf.is_displayed !== false),
     [callFields]
@@ -136,16 +177,18 @@ export default function CampaignProspectsTab({
         const cf =
           lead.custom_fields && typeof lead.custom_fields === "object" ? lead.custom_fields : {};
         const cfStr = Object.values(cf).join(" ").toLowerCase();
+        const assignedUid = String(userById[lead.assigned_to]?.user_id || "").toLowerCase();
         const match =
           String(lead.name || "").toLowerCase().includes(q) ||
           String(lead.phone || "").toLowerCase().includes(q) ||
           String(lead.email || "").toLowerCase().includes(q) ||
+          assignedUid.includes(q) ||
           cfStr.includes(q);
         if (!match) return false;
       }
       return true;
     });
-  }, [campaignLeads, appliedFilters]);
+  }, [campaignLeads, appliedFilters, userById]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -172,6 +215,23 @@ export default function CampaignProspectsTab({
     }
     return `curl --location --request POST '${campaignIngestUrl}' --header 'Content-Type: application/json' --data-raw '${compact}'`;
   }, [campaignIngestUrl, apiTestPayload]);
+
+  function handleDownloadSampleWithUserId() {
+    const csv = buildLeadCsvSample(teamUsers);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeSlug = String(campaign?.name || "campaign")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_");
+    link.href = url;
+    link.download = `${safeSlug}_sample_leads.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    onNotify?.("Downloaded sample CSV including user_id column.");
+  }
 
   function handleApplyFilters() {
     setAppliedFilters({ ...draftFilters });
@@ -249,6 +309,9 @@ export default function CampaignProspectsTab({
         mobile: "std:phone",
         email: "std:email",
         notes: "std:notes",
+        user_id: "std:user_id",
+        userid: "std:user_id",
+        agent_user_id: "std:user_id",
       };
       const fieldKeys = new Set((callFields || []).map((f) => f.field_key));
       const nextMap = {};
@@ -354,11 +417,11 @@ export default function CampaignProspectsTab({
       onNotify?.(res.data?.error || "API ingest failed.");
       return;
     }
-    onNotify?.(`Ingested lead "${res.data.lead?.name || ""}" into ${campaign.name}.`);
+    const count = res.data.inserted_count ?? (res.data.lead ? 1 : 0);
+    onNotify?.(`Ingested ${count} lead(s) into ${campaign.name}.`);
     await onReloadAll?.();
   }
 
-  // Apply button commits selected bulk action (Assign or Delete)
   async function handleApplyBulkAction() {
     if (selectedLeadIds.length === 0) {
       onNotify?.("Select at least one record first.");
@@ -451,6 +514,7 @@ export default function CampaignProspectsTab({
       "Phone",
       "Email",
       "Source",
+      "Assigned User ID",
       "Assigned To",
       "Lead Status",
       "Disposition",
@@ -481,6 +545,7 @@ export default function CampaignProspectsTab({
 
       const latestCall = uniqueCalls[0] || {};
       const cf = l.custom_fields && typeof l.custom_fields === "object" ? l.custom_fields : {};
+      const assignedUser = userById[l.assigned_to];
 
       return [
         campaign?.name || "",
@@ -489,7 +554,8 @@ export default function CampaignProspectsTab({
         l.phone || "",
         l.email || "",
         l.source || "manual",
-        userNameMap[l.assigned_to] || "Unassigned",
+        assignedUser?.user_id || "",
+        assignedUser?.full_name || assignedUser?.email || "Unassigned",
         l.status || "new",
         l.disposition || "",
         l.follow_up_at || "",
@@ -636,7 +702,7 @@ export default function CampaignProspectsTab({
                 <option value="">Unassigned Pool</option>
                 {teamUsers.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.full_name || u.email}
+                    {u.full_name || u.email} ({u.user_id || "—"})
                   </option>
                 ))}
               </select>
@@ -690,11 +756,15 @@ export default function CampaignProspectsTab({
           }}
         >
           <h4 style={{ marginTop: 0 }}>Upload CSV — {campaign.name}</h4>
+          <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
+            Sample CSV includes <code>user_id</code> with this tenant&apos;s user IDs (optional per
+            lead).
+          </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
             <input type="file" accept=".csv,text/csv" onChange={handleCsvFileChange} />
             <button
               type="button"
-              onClick={() => downloadSampleCsv(campaign.name, callFields)}
+              onClick={handleDownloadSampleWithUserId}
               style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}
             >
               Download Sample CSV
@@ -719,6 +789,7 @@ export default function CampaignProspectsTab({
                       <option value="std:name">Customer Name</option>
                       <option value="std:phone">Phone</option>
                       <option value="std:email">Email</option>
+                      <option value="std:user_id">Assigned User ID (user_id)</option>
                       <option value="std:notes">Notes</option>
                       {(callFields || []).map((cf) => (
                         <option key={cf.id || cf.field_key} value={`custom:${cf.field_key}`}>
@@ -765,7 +836,22 @@ export default function CampaignProspectsTab({
             maxWidth: 680,
           }}
         >
-          <h4 style={{ margin: 0 }}>API Ingest — {campaign.name}</h4>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <h4 style={{ margin: 0 }}>API Ingest — {campaign.name}</h4>
+            <button
+              type="button"
+              onClick={() => {
+                setApiPayloadCustomized(false);
+                setApiTestPayload(buildDefaultTwoLeadPayload(teamUsers));
+              }}
+              style={{ padding: "4px 8px", borderRadius: 6, fontSize: 11, cursor: "pointer" }}
+            >
+              Reset 2-Lead Sample
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>
+            <code>user_id</code> is optional per lead; sample uses this tenant&apos;s user IDs.
+          </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
             <code>POST {campaignIngestUrl}</code>
             <button
@@ -793,9 +879,12 @@ export default function CampaignProspectsTab({
           </div>
           <form onSubmit={handleTestApi} style={{ display: "grid", gap: 8 }}>
             <textarea
-              rows={5}
+              rows={10}
               value={apiTestPayload}
-              onChange={(e) => setApiTestPayload(e.target.value)}
+              onChange={(e) => {
+                setApiPayloadCustomized(true);
+                setApiTestPayload(e.target.value);
+              }}
               style={{
                 padding: 8,
                 borderRadius: 6,
@@ -817,7 +906,7 @@ export default function CampaignProspectsTab({
                 cursor: "pointer",
               }}
             >
-              ▶ Send Test Lead
+              ▶ Send Test Leads
             </button>
           </form>
         </div>
@@ -836,7 +925,6 @@ export default function CampaignProspectsTab({
               gap: 10,
             }}
           >
-            {/* Filter Controls + Apply Button */}
             <div
               style={{
                 display: "flex",
@@ -848,7 +936,7 @@ export default function CampaignProspectsTab({
             >
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <input
-                  placeholder="Search name / phone / email..."
+                  placeholder="Search name / phone / email / user ID..."
                   value={draftFilters.search}
                   onChange={(e) => setDraftFilters((f) => ({ ...f, search: e.target.value }))}
                   style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid #cbd5e1" }}
@@ -885,7 +973,7 @@ export default function CampaignProspectsTab({
                     <option value="__unassigned__">Unassigned</option>
                     {teamUsers.map((u) => (
                       <option key={u.id} value={u.id}>
-                        {u.full_name || u.email}
+                        {u.full_name || u.email} ({u.user_id || "—"})
                       </option>
                     ))}
                   </select>
@@ -961,7 +1049,6 @@ export default function CampaignProspectsTab({
               </div>
             </div>
 
-            {/* Bulk Assign / Delete Bar with Apply Button */}
             {!isAgent && canManageCampaign && (
               <div
                 style={{
@@ -991,7 +1078,7 @@ export default function CampaignProspectsTab({
                     <option value="">-- Unassign --</option>
                     {teamUsers.map((u) => (
                       <option key={u.id} value={u.id}>
-                        {u.full_name || u.email}
+                        {u.full_name || u.email} ({u.user_id || "—"})
                       </option>
                     ))}
                   </select>
